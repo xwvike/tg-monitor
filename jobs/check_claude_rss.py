@@ -12,11 +12,17 @@ import xml.etree.ElementTree as ET
 
 import requests
 
+from dotenv import load_dotenv
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+env_path = os.path.join(PROJECT_ROOT, ".env")
+if os.path.exists(env_path):
+    load_dotenv(env_path)
+
 RSS_URL = "https://code.claude.com/docs/en/whats-new/rss.xml"
 STATE_FILE = os.path.join(PROJECT_ROOT, "config", "last_claude_rss.guid")
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
-PROXY = "http://127.0.0.1:10809"
+PROXY = os.getenv("TG_PROXY")
 
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(message)s")
 
