@@ -18,7 +18,7 @@
 
 ```mermaid
 graph TD
-    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|代理(可选)| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
+    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|配置代理| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
     BotAPI <--> SystemdService["⚙️ tg-monitor.service (core/bot.py)"]
     
     subgraph LinuxServer ["Linux Server (Debian/Ubuntu)"]
@@ -35,14 +35,14 @@ graph TD
         AGYEngine <-->|读写脑区| BrainDir["🧠 ~/.gemini/antigravity-cli/brain/"]
         AGYEngine <-->|规章约束| RulesMD["📜 GEMINI.md & AGENTS.md"]
         
-        TaskEngineService["⚙️ tg-task-engine.service (core/task_engine.py)"] -->|热加载 & 校验| TasksYAML["📄 config/tasks.yaml"]
+        TaskEngineService["⚙️ tg-task-engine.service (core/task_engine.py)"] -->|热加载校验| TasksYAML["📄 config/tasks.yaml"]
         TaskEngineService -->|读取| EnvFile
         TaskEngineService -->|维保任务| MaintScript["🧹 jobs/auto-maintenance.sh"]
         TaskEngineService -->|RSS 监控| RSSScript["📰 jobs/check_claude_rss.py"]
         TaskEngineService -->|AI 任务| AGYEngine
         TaskEngineService -->|发送通知| BotAPI
         
-        TGBotCLI <-->|一键快照 & 救援| Snapshots["📸 releases/snapshots/"]
+        TGBotCLI <-->|快照与救援| Snapshots["📸 releases/snapshots/"]
     end
 ```
 
