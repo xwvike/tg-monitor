@@ -18,26 +18,31 @@
 
 ```mermaid
 graph TD
-    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|HTTPS Proxy: 10809| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
+    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|代理(可选)| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
     BotAPI <--> SystemdService["⚙️ tg-monitor.service (core/bot.py)"]
     
-    subgraph LinuxServer ["Linux Server (192.168.100.3)"]
-        SystemdService <-->|容器监控| DockerEngine["🐳 Docker Daemon (Containers)"]
+    subgraph LinuxServer ["Linux Server (Debian/Ubuntu)"]
+        SystemdService <-->|容器监控| DockerEngine["🐳 Docker Daemon"]
         SystemdService <-->|持久化状态| StateJSON["💾 config/user_states.json"]
-        SystemdService <-->|环境变量| EnvFile["🔐 .env (Secrets & Tokens)"]
-        SystemdService <-->|命令行工具| TGBotCLI["💻 tg-bot CLI (/usr/local/bin/tg-bot -> bin/manage.sh)"]
-        SystemdService <-->|子进程调用| AGYEngine["⚡ AGY CLI (--model / --effort)"]
+        SystemdService <-->|全局变量| EnvFile["🔐 .env (Tokens/Proxy)"]
+        SystemdService <-->|系统维护| TGBotCLI["💻 tg-bot CLI (bin/manage.sh)"]
+        SystemdService <-->|AI 核心| AGYEngine["⚡ AGY CLI (--model / --effort)"]
+        SystemdService <-->|语音双向流| VoiceEngine["🎙️ STT & TTS 引擎 (core/stt.py & tts.py)"]
+        
+        VoiceEngine <-->|转码兜底| FFmpeg["🎬 FFmpeg"]
+        VoiceEngine <-->|API 调用| HTTP_APIs["🌐 Whisper & Edge-TTS API"]
         
         AGYEngine <-->|读写脑区| BrainDir["🧠 ~/.gemini/antigravity-cli/brain/"]
         AGYEngine <-->|规章约束| RulesMD["📜 GEMINI.md & AGENTS.md"]
         
         TaskEngineService["⚙️ tg-task-engine.service (core/task_engine.py)"] -->|热加载 & 校验| TasksYAML["📄 config/tasks.yaml"]
+        TaskEngineService -->|读取| EnvFile
         TaskEngineService -->|维保任务| MaintScript["🧹 jobs/auto-maintenance.sh"]
         TaskEngineService -->|RSS 监控| RSSScript["📰 jobs/check_claude_rss.py"]
         TaskEngineService -->|AI 任务| AGYEngine
-        TaskEngineService -->|结果与日志| BotAPI
+        TaskEngineService -->|发送通知| BotAPI
         
-        TGBotCLI <-->|一键快照 & 救援| Snapshots["📸 releases/snapshots/snap_*.tar.gz"]
+        TGBotCLI <-->|一键快照 & 救援| Snapshots["📸 releases/snapshots/"]
     end
 ```
 
