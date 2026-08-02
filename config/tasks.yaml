@@ -1,0 +1,52 @@
+# ==============================================================================
+# TG Monitor 动态定时任务配置文件 (tasks.yaml)
+# 支持热加载、修改自动更新、校验防护
+# ==============================================================================
+
+
+
+tasks:
+  # 任务 1：每周自动维保（原 auto-maintenance.sh 对应的定时任务）
+  - id: "weekly-maintenance"
+    name: "每周系统维保"
+    enabled: true
+    type: "script"
+    cron:
+      day_of_week: "sun"
+      hour: 3
+      minute: 0
+    command: "./jobs/auto-maintenance.sh"
+    notify: true
+
+  # 任务 2：每日 Claude Code RSS 自动更新监控与中文翻译
+  - id: "claude-code-rss-daily"
+    name: "Claude Code RSS 更新监控与中文翻译"
+    enabled: true
+    type: "script"
+    cron:
+      hour: 10
+      minute: 0
+    command: "./venv/bin/python3 ./jobs/check_claude_rss.py"
+    notify: true
+
+  # 任务 3：每 5 小时自动系统快照备份 (循环上限 20 个)
+  - id: "auto-snapshot-5h"
+    name: "每 5 小时自动系统快照备份"
+    enabled: true
+    type: "script"
+    trigger: "interval"
+    interval:
+      hours: 5
+    command: "./bin/manage.sh backup auto_5h"
+    notify: false  # 静默备份，不打扰 Telegram
+
+  # 任务 4：示例 AGY 任务（每日检查 qBittorrent 状态与下载总结）
+  - id: "daily-qbittorrent-check"
+    name: "每日 qBittorrent 状态与下载总结"
+    enabled: false  # 设为 false 表示暂不开启，需开启时改为 true 即可
+    type: "agy_task"
+    cron:
+      hour: 9
+      minute: 0
+    prompt: "检查本地 qBittorrent (http://localhost:8080) 的下载任务状态，总结近24小时的下载情况并汇报。"
+    notify: true
