@@ -21,7 +21,7 @@ graph TD
     User["📱 用户 Telegram (手机/Mac/iPad)"] -->|HTTPS Proxy: 10809| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
     BotAPI <--> SystemdService["⚙️ tg-monitor.service (core/bot.py)"]
     
-    subgraph LinuxServer [Linux Server (192.168.100.3)]
+    subgraph LinuxServer ["Linux Server (192.168.100.3)"]
         SystemdService <-->|容器监控| DockerEngine["🐳 Docker Daemon (Containers)"]
         SystemdService <-->|持久化状态| StateJSON["💾 config/user_states.json"]
         SystemdService <-->|环境变量| EnvFile["🔐 .env (Secrets & Tokens)"]
