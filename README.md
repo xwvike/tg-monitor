@@ -18,7 +18,7 @@
 
 ```mermaid
 graph TD
-    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|配置代理| BotAPI["🤖 Telegram Bot API (@ayatinene_bot)"]
+    User["📱 用户 Telegram (手机/Mac/iPad)"] -->|配置代理| BotAPI["🤖 Telegram Bot API (@your_bot_name)"]
     BotAPI <--> SystemdService["⚙️ tg-monitor.service (core/bot.py)"]
     
     subgraph LinuxServer ["Linux Server (Debian/Ubuntu)"]
