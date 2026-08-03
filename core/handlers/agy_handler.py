@@ -199,7 +199,7 @@ def execute_agy_prompt(
                 if can_speak and cleaned:
 
                     def auto_voice_job():
-                        ok, ogg, dur, _ = generate_telegram_voice(cleaned)
+                        ok, ogg, _dur, _ = generate_telegram_voice(cleaned)
                         if ok and os.path.exists(ogg):
                             try:
                                 with open(ogg, "rb") as vf:
@@ -527,13 +527,11 @@ def register_agy_handlers(
             bot.answer_callback_query(call.id, "正在合成语音消息...")
 
             def process_tts():
-                ok, ogg_path, duration, _ = generate_telegram_voice(cleaned)
+                ok, ogg_path, _duration, _ = generate_telegram_voice(cleaned)
                 if ok and os.path.exists(ogg_path):
                     try:
                         with open(ogg_path, "rb") as voice_f:
-                            bot.send_voice(
-                                call.message.chat.id, voice_f
-                            )
+                            bot.send_voice(call.message.chat.id, voice_f)
                     except Exception as e:
                         bot.send_message(call.message.chat.id, f"❌ 发送语音失败: {e}")
                     finally:

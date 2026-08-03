@@ -31,8 +31,10 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config", "tasks.yaml")
 LOG_PATH = os.path.join(BASE_DIR, "logs", "task_engine.log")
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 
+# 加载项目根目录唯一权威的 .env 凭证文件
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 PROXY_URL = os.getenv("TG_PROXY", "")
+
 
 # 日志配置
 logging.basicConfig(
@@ -46,13 +48,12 @@ logging.basicConfig(
 logger = logging.getLogger("TaskEngine")
 
 
-def send_tg_notification(title: str, body: str, settings: dict):
-    """通过 Telegram 发送通知"""
+def send_tg_notification(title: str, body: str):
+    """通过 Telegram 发送通知 (凭证直接从 .env 环境变量读取)"""
     try:
-        tg_cfg = settings.get("telegram", {})
-        bot_token = os.getenv("TG_BOT_TOKEN") or tg_cfg.get("bot_token")
-        chat_id = os.getenv("TG_CHAT_ID") or tg_cfg.get("chat_id")
-        proxy = os.getenv("TG_PROXY") or tg_cfg.get("proxy")
+        bot_token = os.getenv("TG_BOT_TOKEN")
+        chat_id = os.getenv("TG_CHAT_ID")
+        proxy = os.getenv("TG_PROXY")
 
         if not bot_token or not chat_id:
             logger.warning("Telegram bot_token 或 chat_id 未配置，跳过推送")
@@ -78,7 +79,7 @@ def send_tg_notification(title: str, body: str, settings: dict):
         logger.error(f"发送 Telegram 通知失败: {e}")
 
 
-def run_script_task(task: dict, settings: dict):
+def run_script_task(task: dict):
     """执行 Shell/脚本 类型的任务"""
     task_id = task.get("id")
     name = task.get("name", task_id)
@@ -109,23 +110,19 @@ def run_script_task(task: dict, settings: dict):
         logger.info(f"脚本任务 [{name}] 执行{status_text}")
 
         if task.get("notify", True):
-            send_tg_notification(
-                f"{name} ({status_text})", output or "无输出", settings
-            )
+            send_tg_notification(f"{name} ({status_text})", output or "无输出")
 
     except subprocess.TimeoutExpired:
         logger.error(f"脚本任务 [{name}] 执行超时！")
         if task.get("notify", True):
-            send_tg_notification(
-                f"{name} (超时)", "任务运行超过 30 分钟被强制终止", settings
-            )
+            send_tg_notification(f"{name} (超时)", "任务运行超过 30 分钟被强制终止")
     except Exception as e:
         logger.error(f"脚本任务 [{name}] 运行时异常: {e}")
         if task.get("notify", True):
-            send_tg_notification(f"{name} (异常)", f"发生未捕获异常: {e}", settings)
+            send_tg_notification(f"{name} (异常)", f"发生未捕获异常: {e}")
 
 
-def run_agy_task(task: dict, settings: dict):
+def run_agy_task(task: dict):
     """执行 AGY AI 智能体任务"""
     task_id = task.get("id")
     name = task.get("name", task_id)
@@ -164,28 +161,25 @@ def run_agy_task(task: dict, settings: dict):
             send_tg_notification(
                 f"🤖 AGY: {name} ({status_text})",
                 output or "AI 未返回文本结果",
-                settings,
             )
 
     except subprocess.TimeoutExpired:
         logger.error(f"AGY 任务 [{name}] 执行超时")
         if task.get("notify", True):
-            send_tg_notification(
-                f"🤖 AGY: {name} (超时)", "AGY 任务运行超时已中断", settings
-            )
+            send_tg_notification(f"🤖 AGY: {name} (超时)", "AGY 任务运行超时已中断")
     except Exception as e:
         logger.error(f"AGY 任务 [{name}] 发生异常: {e}")
         if task.get("notify", True):
-            send_tg_notification(f"🤖 AGY: {name} (错误)", f"异常: {e}", settings)
+            send_tg_notification(f"🤖 AGY: {name} (错误)", f"异常: {e}")
 
 
-def dispatch_task(task: dict, settings: dict):
+def dispatch_task(task: dict):
     """任务分发入口"""
     task_type = task.get("type")
     if task_type == "script":
-        run_script_task(task, settings)
+        run_script_task(task)
     elif task_type == "agy_task":
-        run_agy_task(task, settings)
+        run_agy_task(task)
     else:
         logger.warning(f"未知任务类型 [{task_type}] for task ID: {task.get('id')}")
 
@@ -205,8 +199,8 @@ class ConfigManager:
             logger.warning("配置校验失败：根元素必须为字典/对象")
             return False
 
-        if "settings" not in raw_data or "tasks" not in raw_data:
-            logger.warning("配置校验失败：缺失 'settings' 或 'tasks' 节点")
+        if "tasks" not in raw_data:
+            logger.warning("配置校验失败：缺失 'tasks' 节点")
             return False
 
         tasks = raw_data.get("tasks", [])
@@ -318,7 +312,6 @@ class TaskEngine:
 
     def sync_tasks(self, config: dict):
         """将最新的配置表同步刷新至 APScheduler 中"""
-        settings = config.get("settings", {})
         tasks = config.get("tasks", [])
         configured_ids = set()
 
@@ -349,7 +342,7 @@ class TaskEngine:
                 self.scheduler.add_job(
                     func=dispatch_task,
                     trigger=trigger,
-                    args=[task, settings],
+                    args=[task],
                     id=task_id,
                     name=name,
                     replace_existing=True,

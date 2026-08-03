@@ -21,7 +21,7 @@ def get_cpu_temp():
         for key in ["coretemp", "k10temp", "zenpower", "cpu_thermal", "acpitz"]:
             if temps.get(key):
                 return temps[key][0].current
-        for k, v in temps.items():
+        for v in temps.values():
             if v:
                 return v[0].current
     except Exception:
@@ -39,7 +39,7 @@ def register_system_handlers(bot, allowed_user_id: int):
         bot.send_chat_action(message.chat.id, "typing")
         try:
             cpu_usage = psutil.cpu_percent(interval=1)
-            load1, load5, load15 = psutil.getloadavg()
+            _load1, load5, _load15 = psutil.getloadavg()
             mem = psutil.virtual_memory()
             disk = psutil.disk_usage("/")
             temp = get_cpu_temp()
@@ -127,6 +127,7 @@ def register_system_handlers(bot, allowed_user_id: int):
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
             import time as _time
+
             _time.sleep(0.5)
 
             processes = sorted(

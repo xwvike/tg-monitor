@@ -19,7 +19,9 @@ import time
 
 import requests
 
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="[%(asctime)s] [%(levelname)s] %(message)s"
+)
 logger = logging.getLogger("STTEngine")
 
 STT_API_URL = os.getenv("STT_API_URL", "http://127.0.0.1:8000/v1/audio/transcriptions")
@@ -115,7 +117,9 @@ def transcribe_voice_file(
     if ok1:
         return True, res1
 
-    logger.warning("⚠️ 阶段 1 直传识别未成功，启动【阶段 2】FFmpeg 16kHz 重采样归一化兜底...")
+    logger.warning(
+        "⚠️ 阶段 1 直传识别未成功，启动【阶段 2】FFmpeg 16kHz 重采样归一化兜底..."
+    )
 
     # 阶段 2: 本地重采样后二次提交
     ok_norm, norm_wav = normalize_audio_to_wav(file_path)

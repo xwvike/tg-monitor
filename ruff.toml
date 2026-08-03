@@ -1,0 +1,8 @@
+[lint]
+ignore = [
+    "BLE001",   # Catching blind Exception (intentional for daemon resilience)
+    "PLW1510",  # subprocess.run without explicit check=False argument (default is False anyway)
+    "S110",     # try-except-pass (used in cleanup tasks where failure is ignored)
+    "DTZ005",   # datetime.now() without tz
+    "DTZ006",   # datetime.fromtimestamp() without tz
+]

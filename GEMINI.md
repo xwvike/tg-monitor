@@ -13,7 +13,7 @@
   - `core/handlers/system_handler.py`: Layer 2 硬件诊断、Docker 容器与 Systemctl 健康度 Handler
   - `core/handlers/agy_handler.py`: Layer 3 AGY AI 对话、多模态、模型/思考深度切换与消息防抖 Handler
 - **配置与持久化 (`config/`)**:
-  - `config/tasks.yaml`: 声明式定时任务配置表
+  - `config/tasks.yaml`: 纯声明式定时任务配置表 (不含凭证，凭证由 `.env` 直接提供)
   - `config/user_states.json`: 机器人会话模式、选定 AI 模型与思考深度持久化文件
 - **定时任务与脚本库 (`jobs/`)**:
   - `jobs/auto-maintenance.sh`: 周自动维保脚本 (AGY 更新、Docker prune、日志清理)
@@ -52,6 +52,7 @@
 3. **安全升级部署**: 执行 `tg-bot upgrade <new_file>`（自动先抓快照 ➔ 校验代码 ➔ 部署重启 ➔ 崩溃自动触发自救回滚）。
 
 ### 4. 声明式定时任务配置规范 (`config/tasks.yaml` & `core/task_engine.py`)
+- **纯任务声明表**: `tasks.yaml` 只定义“做什么、什么时候做”，严禁在其中放置任何凭证、Token 或连接信息。通知发送模块直接从 `.env` 环境变量读取。
 - **禁用硬编码 timer**: 严禁直接新建或硬编码系统级的 `systemd timer`，统一在 `config/tasks.yaml` 中配置。
 - **任务放置规范**: 所有新增的定时任务代码或即用即弃脚本，统一存放在 `jobs/` 目录下，严禁随手丢在项目根目录。
 

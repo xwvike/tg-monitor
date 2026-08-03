@@ -12,8 +12,8 @@ import subprocess
 import sys
 
 import telebot
-from telebot import apihelper, types
 from dotenv import load_dotenv
+from telebot import apihelper, types
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 load_dotenv(os.path.join(os.path.dirname(__file__), "../.env"))
@@ -324,9 +324,7 @@ if __name__ == "__main__":
             try:
                 py_compile.compile(pf, doraise=True)
             except py_compile.PyCompileError as compile_err:
-                scan_failed.append(
-                    (os.path.relpath(pf, project_dir), str(compile_err))
-                )
+                scan_failed.append((os.path.relpath(pf, project_dir), str(compile_err)))
 
         if scan_failed:
             print(f"[1/3] ❌ 语法预检失败 ({len(scan_failed)} 个文件):")
