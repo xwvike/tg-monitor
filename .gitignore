@@ -8,3 +8,4 @@ config/user_states.json
 .idea/
 .vscode/
 .DS_Store
+config/*.guid
