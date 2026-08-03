@@ -612,19 +612,22 @@ def register_agy_handlers(
 
             if caption:
                 prompt = (
-                    f"[系统文件注入] 用户上传了图片请求处理。\\n"
-                    f"▶️ 文件路径: {tmp_path}\\n"
-                    f"▶️ 文件大小: {size_mb} MB\\n"
-                    f"▶️ 预期输出目录: {workspace_out}\\n"
-                    f"▶️ 用户的说明: {caption}\\n\\n"
-                    f"🚨 你的任务: 查阅 config/TOOLCHAIN.md 与 config/file_recipes/，优先调用终端工具(如 ImageMagick/pngquant)处理此文件。\\n"
-                    f"如果有产出文件，请务必将其生成到预期输出目录 ({workspace_out}) 中。系统会自动回传给用户。\\n"
-                    f"如果是视觉分析问题，请直接回答。"
+                    f"[系统文件注入] 用户上传了图片，并附带了明确指令。\n"
+                    f"▶️ 文件路径: {tmp_path}\n"
+                    f"▶️ 文件大小: {size_mb} MB\n"
+                    f"▶️ 预期输出目录: {workspace_out}\n"
+                    f"▶️ 用户指令: {caption}\n\n"
+                    f"🚨 【最高优先级操作规范】:\n"
+                    f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
+                    f"2. 根据【用户指令】，在终端执行相应的命令（如 convert, pngquant 等）处理该文件。\n"
+                    f"3. 严禁偷懒只做口头分析！只要用户的指令暗示了文件操作（如压缩、拼接、加水印），必须产出真实文件到 {workspace_out} 目录。\n"
+                    f"4. 只有当指令纯粹是问答（如 '这是什么'）时，才允许仅回复文本。"
                 )
             else:
                 prompt = (
-                    f"[系统文件注入] 用户上传了一张图片 (大小: {size_mb} MB)，存放于 {tmp_path}，预期输出目录 {workspace_out}。\\n"
-                    f"用户未提供说明。请详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
+                    f"[系统文件注入] 用户上传了一张图片 (大小: {size_mb} MB)，存放于 {tmp_path}，预期输出目录 {workspace_out}。\n"
+                    f"用户未提供任何指令说明。\n"
+                    f"请简要描述这是一张什么图片，并主动询问用户是否需要进行工具链处理（如: 压缩体积、转换格式等）。"
                 )
 
             execute_agy_prompt(
@@ -722,14 +725,16 @@ def register_agy_handlers(
             size_mb = round(file_size / (1024 * 1024), 2)
 
             prompt = (
-                f"[系统文件注入] 用户上传了文件请求处理。\\n"
-                f"▶️ 文件路径: {tmp_path}\\n"
-                f"▶️ 文件大小: {size_mb} MB\\n"
-                f"▶️ 预期输出目录: {workspace_out}\\n"
-                f"▶️ 用户的说明: {caption}\\n\\n"
-                f"🚨 你的任务: 查阅 config/TOOLCHAIN.md 与 config/file_recipes/，调用终端工具处理此文件。\\n"
-                f"如果有产出文件，请务必将其生成到预期输出目录 ({workspace_out}) 中。系统会自动将该目录下的产物回传给用户。\\n"
-                f"如果不需要产生文件（如信息提取），直接输出分析结果文本即可。"
+                f"[系统文件注入] 用户上传了文件，并附带了明确指令。\n"
+                f"▶️ 文件路径: {tmp_path}\n"
+                f"▶️ 文件大小: {size_mb} MB\n"
+                f"▶️ 预期输出目录: {workspace_out}\n"
+                f"▶️ 用户指令: {caption}\n\n"
+                f"🚨 【最高优先级操作规范】:\n"
+                f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
+                f"2. 根据【用户指令】，使用终端工具（如 ffmpeg, convert, pandoc 等）对文件进行实际的物理处理。\n"
+                f"3. 严禁偷懒只做口头分析！只要用户的指令暗示了文件操作（如压缩、转码、裁剪），必须产出真实文件到 {workspace_out} 目录。\n"
+                f"4. 只有当指令纯粹是信息提取（如 '读取这个pdf的内容'）时，才允许仅输出文本结果。"
             )
 
             execute_agy_prompt(
