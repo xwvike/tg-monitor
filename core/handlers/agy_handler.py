@@ -594,6 +594,19 @@ def register_agy_handlers(
 
             file_size = getattr(file_info, "file_size", len(downloaded_file))
             size_mb = round(file_size / (1024 * 1024), 2)
+            
+            if file_size > 20 * 1024 * 1024:
+                bot.send_message(
+                    message.chat.id,
+                    f"⚠️ <b>文件过大 ({size_mb} MB)</b>\n"
+                    f"──────────────────────\n"
+                    f"Telegram 官方标准 Bot API 限制单文件接收不能超过 <b>20MB</b>。\n"
+                    f"💡 <b>破局方案</b>：您可以在文字中附带文件的外部下载链接，让 AGY 自己通过 <code>wget</code> 或 <code>curl</code> 下载处理。",
+                    parse_mode="HTML",
+                    reply_to_message_id=message.message_id
+                )
+                return
+            
             caption = message.caption
 
             if caption:
@@ -672,6 +685,20 @@ def register_agy_handlers(
 
             file_id = file_info_obj.file_id
             file_size = getattr(file_info_obj, "file_size", 0)
+            size_mb = round(file_size / (1024 * 1024), 2)
+
+            if file_size > 20 * 1024 * 1024:
+                bot.send_message(
+                    message.chat.id,
+                    f"⚠️ <b>文件过大 ({size_mb} MB)</b>\n"
+                    f"──────────────────────\n"
+                    f"Telegram 官方标准 Bot API 限制单文件接收不能超过 <b>20MB</b>。\n"
+                    f"💡 <b>破局方案</b>：您可以在文字中附带文件的外部下载链接，让 AGY 自己通过 <code>wget</code> 或 <code>curl</code> 下载处理。",
+                    parse_mode="HTML",
+                    reply_to_message_id=message.message_id
+                )
+                return
+
             file_name = getattr(file_info_obj, "file_name", None)
             if not file_name:
                 ext = ".mp4" if message.content_type in ["video", "video_note"] else ".ogg" if message.content_type == "audio" else ".bin"
