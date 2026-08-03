@@ -8,6 +8,7 @@ import glob
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -55,7 +56,7 @@ def get_brain_conversations():
 
 
 def execute_agy_prompt(
-    bot, message, prompt, get_user_state_fn, save_user_states_fn, image_path=None
+    bot, message, prompt, get_user_state_fn, save_user_states_fn, image_path=None, workspaces=None
 ):
     """主执行逻辑：含 4秒 typing 守护线程与离线进程管理"""
     chat_id = message.chat.id
@@ -232,6 +233,27 @@ def execute_agy_prompt(
                     os.remove(image_path)
                 except Exception:
                     pass
+
+            if workspaces:
+                out_dir = workspaces.get("out")
+                if out_dir and os.path.exists(out_dir):
+                    try:
+                        for f_name in os.listdir(out_dir):
+                            f_path = os.path.join(out_dir, f_name)
+                            if os.path.isfile(f_path):
+                                bot.send_chat_action(chat_id, "upload_document")
+                                with open(f_path, "rb") as out_f:
+                                    bot.send_document(chat_id, out_f, reply_to_message_id=message.message_id)
+                    except Exception as e:
+                        logger.error(f"发送产出文件失败: {e}")
+                
+                try:
+                    if workspaces.get("in") and os.path.exists(workspaces.get("in")):
+                        shutil.rmtree(workspaces.get("in"))
+                    if out_dir and os.path.exists(out_dir):
+                        shutil.rmtree(out_dir)
+                except Exception as e:
+                    logger.error(f"清理临时工作区失败: {e}")
 
     threading.Thread(target=process).start()
 
@@ -601,6 +623,76 @@ def register_agy_handlers(
             get_user_state_fn,
             save_user_states_fn,
         )
+
+    @bot.message_handler(content_types=["document", "video", "audio", "video_note"])
+    def handle_any_file(message):
+        if message.from_user.id != allowed_user_id:
+            return
+        st = get_user_state_fn(message.from_user.id)
+        if not st.get("in_chat", False):
+            return
+
+        bot.send_chat_action(message.chat.id, "upload_document")
+        try:
+            if message.content_type == "document":
+                file_info_obj = message.document
+            elif message.content_type == "video":
+                file_info_obj = message.video
+            elif message.content_type == "audio":
+                file_info_obj = message.audio
+            elif message.content_type == "video_note":
+                file_info_obj = message.video_note
+            else:
+                return
+
+            file_id = file_info_obj.file_id
+            file_size = getattr(file_info_obj, "file_size", 0)
+            file_name = getattr(file_info_obj, "file_name", None)
+            if not file_name:
+                ext = ".mp4" if message.content_type in ["video", "video_note"] else ".ogg" if message.content_type == "audio" else ".bin"
+                file_name = f"file_{int(time.time())}{ext}"
+
+            file_info = bot.get_file(file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+
+            msg_id = f"{message.message_id}_{int(time.time())}"
+            workspace_in = f"/tmp/tg_files/in/{msg_id}"
+            workspace_out = f"/tmp/tg_files/out/{msg_id}"
+            os.makedirs(workspace_in, exist_ok=True)
+            os.makedirs(workspace_out, exist_ok=True)
+
+            tmp_path = os.path.join(workspace_in, file_name)
+            with open(tmp_path, "wb") as new_file:
+                new_file.write(downloaded_file)
+
+            caption = message.caption or "无附加说明"
+            size_mb = round(file_size / (1024 * 1024), 2)
+
+            prompt = (
+                f"[系统文件注入] 用户上传了文件请求处理。\\n"
+                f"▶️ 文件路径: {tmp_path}\\n"
+                f"▶️ 文件大小: {size_mb} MB\\n"
+                f"▶️ 预期输出目录: {workspace_out}\\n"
+                f"▶️ 用户的说明: {caption}\\n\\n"
+                f"🚨 你的任务: 查阅 config/TOOLCHAIN.md 与 config/file_recipes/，调用终端工具处理此文件。\\n"
+                f"如果有产出文件，请务必将其生成到预期输出目录 ({workspace_out}) 中。系统会自动将该目录下的产物回传给用户。\\n"
+                f"如果不需要产生文件（如信息提取），直接输出分析结果文本即可。"
+            )
+
+            execute_agy_prompt(
+                bot,
+                message,
+                prompt,
+                get_user_state_fn,
+                save_user_states_fn,
+                workspaces={"in": workspace_in, "out": workspace_out},
+            )
+        except Exception as e:
+            bot.send_message(
+                message.chat.id,
+                f"❌ 文件接收失败: {e}",
+                reply_to_message_id=message.message_id,
+            )
 
     @bot.message_handler(content_types=["voice"])
     def handle_voice(message):
