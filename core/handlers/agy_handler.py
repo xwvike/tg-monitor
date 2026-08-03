@@ -194,8 +194,9 @@ def execute_agy_prompt(
                     chat_id, reply_text, parse_mode="HTML", reply_markup=tts_markup
                 )
 
-            # 思路 1: 若用户启用了 auto_voice 且满足短文无代码块条件，自动发送语音泡泡
-            if state.get("auto_voice", False):
+            # 思路 1: 若用户启用了 auto_voice 且满足短文无代码块条件，且非系统自动注入的文件处理任务，自动发送语音泡泡
+            is_file_task = workspaces is not None or "[系统文件注入]" in prompt
+            if state.get("auto_voice", False) and not is_file_task:
                 can_speak, cleaned = should_auto_speak(output)
                 if can_speak and cleaned:
 
