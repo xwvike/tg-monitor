@@ -84,7 +84,7 @@ def execute_agy_prompt(
         env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
         final_prompt = prompt
-        if image_path:
+        if image_path and "[系统文件注入]" not in prompt:
             final_prompt = f"[{prompt}] 请识别分析这张附件图片文件：{image_path}"
 
         cmd = [AGY_BIN, "--dangerously-skip-permissions"]
@@ -581,14 +581,38 @@ def register_agy_handlers(
             fileID = message.photo[-1].file_id
             file_info = bot.get_file(fileID)
             downloaded_file = bot.download_file(file_info.file_path)
-            tmp_path = f"/tmp/tg_photo_{message.from_user.id}_{int(time.time())}.jpg"
+
+            msg_id = f"{message.message_id}_{int(time.time())}"
+            workspace_in = f"/tmp/tg_files/in/{msg_id}"
+            workspace_out = f"/tmp/tg_files/out/{msg_id}"
+            os.makedirs(workspace_in, exist_ok=True)
+            os.makedirs(workspace_out, exist_ok=True)
+
+            tmp_path = os.path.join(workspace_in, f"photo_{int(time.time())}.jpg")
             with open(tmp_path, "wb") as new_file:
                 new_file.write(downloaded_file)
 
-            prompt = (
-                message.caption
-                or "详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
-            )
+            file_size = getattr(file_info, "file_size", len(downloaded_file))
+            size_mb = round(file_size / (1024 * 1024), 2)
+            caption = message.caption
+
+            if caption:
+                prompt = (
+                    f"[系统文件注入] 用户上传了图片请求处理。\\n"
+                    f"▶️ 文件路径: {tmp_path}\\n"
+                    f"▶️ 文件大小: {size_mb} MB\\n"
+                    f"▶️ 预期输出目录: {workspace_out}\\n"
+                    f"▶️ 用户的说明: {caption}\\n\\n"
+                    f"🚨 你的任务: 查阅 config/TOOLCHAIN.md 与 config/file_recipes/，优先调用终端工具(如 ImageMagick/pngquant)处理此文件。\\n"
+                    f"如果有产出文件，请务必将其生成到预期输出目录 ({workspace_out}) 中。系统会自动回传给用户。\\n"
+                    f"如果是视觉分析问题，请直接回答。"
+                )
+            else:
+                prompt = (
+                    f"[系统文件注入] 用户上传了一张图片 (大小: {size_mb} MB)，存放于 {tmp_path}，预期输出目录 {workspace_out}。\\n"
+                    f"用户未提供说明。请详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
+                )
+
             execute_agy_prompt(
                 bot,
                 message,
@@ -596,6 +620,7 @@ def register_agy_handlers(
                 get_user_state_fn,
                 save_user_states_fn,
                 image_path=tmp_path,
+                workspaces={"in": workspace_in, "out": workspace_out},
             )
         except Exception as e:
             bot.send_message(
