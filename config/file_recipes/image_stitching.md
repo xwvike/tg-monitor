@@ -12,10 +12,10 @@
 **规则**：所有图片必须统一**宽度**。
 **步骤**：
 ```bash
-# 假设多张图片在当前目录下
+# 输入必须写成任务给定的真实绝对路径，按用户期望的顺序排列
 # -resize 1080x 表示将所有图片按比例缩放，使得宽度统一为 1080 像素
 # -append 表示垂直拼接（从上到下）
-convert image1.jpg image2.jpg image3.jpg -resize 1080x -append "$OUTPUT_DIR/stitched_vertical.jpg"
+convert <图1绝对路径> <图2绝对路径> <图3绝对路径> -resize 1080x -append <输出目录>/stitched_vertical.jpg
 ```
 
 ### 2. 水平拼接（左右拼接）
@@ -24,23 +24,21 @@ convert image1.jpg image2.jpg image3.jpg -resize 1080x -append "$OUTPUT_DIR/stit
 ```bash
 # -resize x1080 表示将所有图片按比例缩放，使得高度统一为 1080 像素
 # +append 表示水平拼接（从左到右）
-convert image1.jpg image2.jpg image3.jpg -resize x1080 +append "$OUTPUT_DIR/stitched_horizontal.jpg"
+convert <图1绝对路径> <图2绝对路径> -resize x1080 +append <输出目录>/stitched_horizontal.jpg
 ```
 
 ### 3. 拼接前的单图预处理（按需）
 如果用户要求在拼接前对特定图片进行处理，可以在 `convert` 管道中加入参数，或者分步执行：
 ```bash
-# 旋转 90 度
-convert image1.jpg -rotate 90 temp1.jpg
-
-# 裁剪 (宽高+X偏移+Y偏移)
-convert image2.jpg -crop 800x800+10+10 temp2.jpg
-
-# 最后再将预处理好的图片进行统一拼接
-convert temp1.jpg temp2.jpg -resize 1080x -append "$OUTPUT_DIR/final_stitched.jpg"
+# 中间产物一律放在输出目录下，最后一步再删除，避免污染输入目录
+convert <图1绝对路径> -rotate 90 <输出目录>/_tmp1.jpg
+convert <图2绝对路径> -crop 800x800+10+10 <输出目录>/_tmp2.jpg
+convert <输出目录>/_tmp1.jpg <输出目录>/_tmp2.jpg -resize 1080x -append <输出目录>/stitched_result.jpg
+rm -f <输出目录>/_tmp1.jpg <输出目录>/_tmp2.jpg
 ```
 
 ## 输出规范
-- 最终生成的拼接图片必须保存在分配的 `workspace_out` 目录中。
+- 最终生成的拼接图片必须保存在任务指定的输出目录中。
+- 多图任务的输入顺序按任务给出的文件列表顺序排列（文件名已带序号前缀）。
 - 输出文件名建议格式: `stitched_result.jpg` (如果是透明背景拼接，请使用 `.png`)
 - 拼接完成后，请自行清理中途产生的解压文件或临时图片。

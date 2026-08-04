@@ -8,6 +8,7 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,162 +22,232 @@ from telebot import types
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
+from core.file_pipeline import (
+    AUDIO_EXTS,
+    INTERNAL_MARKER,
+    VIDEO_EXTS,
+    classify_intent,
+    plan_and_execute,
+)
 from core.stt import transcribe_voice_file
 from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_speak
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 BRAIN_DIR = os.path.expanduser("~/.gemini/antigravity-cli/brain")
+WORKSPACE_ROOT = "/tmp/tg_files"
+MAX_TG_FILE_SIZE = 20 * 1024 * 1024
+MEDIA_GROUP_WINDOW = 2.5  # 相册各分片是独立 message，需要一个收集窗口攒成单次任务
+FILE_CAPTION_WINDOW = 3.5  # 无附言的文件先等一个窗口，接住用户随后补打的那句指令
+TEXT_ABSORB_MAX_AGE = 3.0  # 文件到达时，回头吸收这个时限内刚到的文本作为其指令
 logger = logging.getLogger("AGYHandler")
 
 user_buffers = {}  # Message debouncing: {user_id: {"messages": list, "timer": Timer}}
 user_buffers_lock = threading.Lock()  # 保护 user_buffers 防止防抖 Timer 竞态
 
+# 每个用户当前正在组装的一批文件。相册聚合与"等你补一句指令"合并成同一个结算
+# 定时器 —— 拆成两套会留下下载窗口的空档，那几秒到达的文字两头都认领不到。
+file_batches = {}
+file_batches_lock = threading.Lock()
+
+# 同一用户的 agy 调用必须串行：并发进程写同一个 --conversation 会让模型
+# 在一次回答里收到两份互相干扰的 prompt（"重复提示词扰动"）。
+conv_locks = {}
+conv_locks_guard = threading.Lock()
+
+
+def _get_conv_lock(user_id):
+    with conv_locks_guard:
+        if user_id not in conv_locks:
+            conv_locks[user_id] = threading.Lock()
+        return conv_locks[user_id]
+
+
+# INTERNAL_MARKER 只对打标记之后新建的会话生效。这些是打标记之前留在 BRAIN_DIR
+# 里的内部会话特征，同样必须识别出来，否则它们会一直挂在 /history 里，
+# 并且在 conv_id 为空时仍可能被误绑为用户主会话。
+LEGACY_INTERNAL_SIGNATURES = (
+    "你是文件处理命令 Planner",
+    "你是一个专门用于生成文件处理命令的智能 Planner",
+    "请判断：用户的核心意图是想利用系统能力对文件进行物理处理",
+    "判断用户的核心意图：想对文件做物理处理",
+)
+
+
+def _is_internal_conversation(first_msg):
+    if INTERNAL_MARKER in first_msg:
+        return True
+    return any(sig in first_msg for sig in LEGACY_INTERNAL_SIGNATURES)
+
+
+def _clean_preview(raw):
+    """剥掉 agy 的 XML 包装，只留用户真正说的那句话，供 /history 列表展示。"""
+    text = re.sub(
+        r"<ADDITIONAL_METADATA>.*?</ADDITIONAL_METADATA>", "", raw, flags=re.DOTALL
+    )
+    text = re.sub(
+        r"<USER_SETTINGS_CHANGE>.*?</USER_SETTINGS_CHANGE>", "", text, flags=re.DOTALL
+    )
+    text = re.sub(r"</?USER_REQUEST>", "", text)
+    return " ".join(text.split()) or "（新对话或空记录）"
+
 
 def get_brain_conversations():
+    """列出用户的真实会话。
+
+    agy 没有 brain 目录隔离参数，Planner / 意图判定这类内部一次性调用同样会在
+    BRAIN_DIR 里落一个会话。这些必须过滤掉，否则不但污染 /history，还会在
+    conv_id 为空时被 execute_agy_prompt 当成"最近的会话"误绑为用户主会话。
+    """
     brain_dirs = glob.glob(os.path.join(BRAIN_DIR, "*"))
     conversations = []
     for d in brain_dirs:
         cid = os.path.basename(d)
         log_file = os.path.join(d, ".system_generated", "logs", "transcript.jsonl")
-        if os.path.exists(log_file):
-            first_msg = "（新对话或空记录）"
-            try:
-                with open(log_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        if '"type":"USER_INPUT"' in line:
-                            data = json.loads(line)
-                            first_msg = data.get("content", first_msg)
-                            break
-            except Exception:
-                pass
-            mtime = os.path.getmtime(log_file)
-            conversations.append((cid, first_msg, mtime))
+        if not os.path.exists(log_file):
+            continue
+
+        first_msg = "（新对话或空记录）"
+        try:
+            with open(log_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    if '"type":"USER_INPUT"' in line:
+                        data = json.loads(line)
+                        first_msg = data.get("content", first_msg)
+                        break
+        except Exception:
+            pass
+
+        if _is_internal_conversation(first_msg):
+            continue
+
+        conversations.append((cid, _clean_preview(first_msg), os.path.getmtime(log_file)))
+
     conversations.sort(key=lambda x: x[2], reverse=True)
     return conversations
 
 
-import re
+def _send_product(bot, chat_id, reply_to, path):
+    """按产物类型选择投递方式。
 
-def check_intent_is_file_processing(caption, file_name):
-    if not caption:
-        return False
-        
-    prompt = (
-        f"系统具备的文件处理能力包括：音视频处理(FFmpeg)、图片处理(ImageMagick/pngquant)、文档转换(Pandoc/Poppler)等。\n"
-        f"用户上传了一个文件 [{file_name}]，附带指令：\"{caption}\"\n\n"
-        f"请判断：用户的核心意图是想利用系统能力对文件进行物理处理/转换/压缩等（回复 True），还是单纯的视觉问答/内容解释/文本提取（回复 False）。\n"
-        f"必须仅回复 True 或 False。"
-    )
-    cmd = [
-        AGY_BIN,
-        "--model", "gemini-3.6-flash-high",
-        "--dangerously-skip-permissions",
-        "-p", prompt
-    ]
-    try:
-        env = os.environ.copy()
-        env["HTTP_PROXY"] = "http://127.0.0.1:10809"
-        env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
-        local_bin = os.path.expanduser("~/.local/bin")
-        env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
-        
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
-        output = (res.stdout.strip() + res.stderr.strip()).lower()
-        if "true" in output:
-            return True
-        return False
-    except Exception as e:
-        logger.error(f"意图识别失败: {e}")
-        return False
+    图片一律走 send_document：send_photo 会被 Telegram 二次压缩，
+    那会直接抵消掉压缩/画质类任务的全部意义。
+    """
+    ext = os.path.splitext(path)[1].lower()
+    with open(path, "rb") as fh:
+        if ext == ".gif":
+            bot.send_chat_action(chat_id, "upload_video")
+            bot.send_animation(chat_id, fh, reply_to_message_id=reply_to)
+        elif ext in VIDEO_EXTS:
+            bot.send_chat_action(chat_id, "upload_video")
+            bot.send_video(chat_id, fh, reply_to_message_id=reply_to)
+        elif ext in AUDIO_EXTS:
+            bot.send_chat_action(chat_id, "upload_audio")
+            bot.send_audio(chat_id, fh, reply_to_message_id=reply_to)
+        else:
+            bot.send_chat_action(chat_id, "upload_document")
+            bot.send_document(chat_id, fh, reply_to_message_id=reply_to)
 
 
-def generate_and_execute_file_commands(bot, message, tmp_path, workspace_in, workspace_out, caption, get_user_state_fn):
+def run_file_task(bot, message, file_paths, workspace_in, workspace_out, caption, model):
+    """驱动文件处理流水线，并用单条可编辑消息汇报进度。"""
     chat_id = message.chat.id
-    bot.send_message(chat_id, "⚙️ 识别到文件处理意图，正在规划执行步骤...", reply_to_message_id=message.message_id)
-    
-    state = get_user_state_fn(message.from_user.id)
-    model = state.get("model", "gemini-3.6-pro")
-    
-    prompt = (
-        f"你是一个专门用于生成文件处理命令的智能 Planner。\n"
-        f"输入文件路径: {tmp_path}\n"
-        f"目标输出目录: {workspace_out}\n"
-        f"用户的处理需求: {caption}\n\n"
-        f"任务指南:\n"
-        f"1. 务必先调用工具查阅 config/TOOLCHAIN.md 与 config/file_recipes/ 来决定最佳工具命令（如 ffmpeg, convert）。\n"
-        f"2. 决定后，生成一组能够在 linux bash 环境中执行的命令序列，这些命令必须能完成任务并将最终结果保存到 {workspace_out} 目录下。\n"
-        f"3. 严禁直接读取解析文件内容给用户看！\n"
-        f"4. 将最终的命令序列严格组装成一个 JSON 字符串数组，并必须用 <json> 和 </json> 标签包裹。\n"
-        f"示例: <json>[\"convert {tmp_path} -resize 50% {workspace_out}/out.jpg\"]</json>"
-    )
-    
-    cmd = [
-        AGY_BIN,
-        "--model", model,
-        "--dangerously-skip-permissions",
-        "-p", prompt
-    ]
-    
-    def process_task():
+    try:
+        status_msg = bot.send_message(
+            chat_id, "⚙️ 正在规划处理步骤...", reply_to_message_id=message.message_id
+        )
+    except Exception:
+        status_msg = None
+
+    last_text = {"value": ""}
+
+    def on_status(text):
+        if status_msg is None or text == last_text["value"]:
+            return
+        last_text["value"] = text
         try:
-            env = os.environ.copy()
-            env["HTTP_PROXY"] = "http://127.0.0.1:10809"
-            env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
-            local_bin = os.path.expanduser("~/.local/bin")
-            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
-            
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
-            output = res.stdout.strip()
-            
-            match = re.search(r"<json>(.*?)</json>", output, re.DOTALL)
-            if not match:
-                logger.error(f"无法提取JSON: {output}")
-                bot.send_message(chat_id, "❌ 规划失败，AGY 未能输出合法的处理步骤格式。")
-                return
-                
-            json_str = match.group(1).strip()
-            commands = json.loads(json_str)
-            if not isinstance(commands, list):
-                raise ValueError("解析到的 JSON 不是一个数组")
-                
-            if len(commands) == 0:
-                bot.send_message(chat_id, "⚠️ AGY 规划了空命令，无法处理。")
-                return
-                
-            bot.send_message(chat_id, f"🚀 开始执行 {len(commands)} 步处理命令...")
-            for i, bash_cmd in enumerate(commands):
-                subprocess.run(bash_cmd, shell=True, check=True, executable="/bin/bash")
-                
-            files_sent = 0
-            for f_name in os.listdir(workspace_out):
-                f_path = os.path.join(workspace_out, f_name)
-                if os.path.isfile(f_path):
-                    bot.send_chat_action(chat_id, "upload_document")
-                    with open(f_path, "rb") as out_f:
-                        bot.send_document(chat_id, out_f, reply_to_message_id=message.message_id)
-                    files_sent += 1
-                    
-            if files_sent == 0:
-                bot.send_message(chat_id, "⚠️ 处理完成，但未在输出目录生成任何文件。")
-                
-        except json.JSONDecodeError:
-            bot.send_message(chat_id, "❌ 解析命令失败，AGY 吐出了不标准的 JSON。")
-        except subprocess.CalledProcessError as e:
-            bot.send_message(chat_id, f"❌ 执行工具命令时报错，请检查文件或描述是否正确。\n错误代码: {e.returncode}")
-        except Exception as e:
-            bot.send_message(chat_id, f"❌ 处理发生未知错误: {e}")
-        finally:
-            import shutil
+            bot.edit_message_text(text, chat_id, status_msg.message_id)
+        except Exception:
+            pass
+
+    try:
+        ok, products, error = plan_and_execute(
+            file_paths, workspace_in, workspace_out, caption, model, on_status
+        )
+
+        if ok:
+            on_status(f"✅ 处理完成，正在回传 {len(products)} 个文件...")
+            for path in products:
+                try:
+                    _send_product(bot, chat_id, message.message_id, path)
+                except Exception as e:
+                    logger.error(f"回传产物 {path} 失败: {e}")
+                    bot.send_message(chat_id, f"⚠️ 产物 {os.path.basename(path)} 回传失败: {e}")
+            if status_msg is not None:
+                try:
+                    bot.delete_message(chat_id, status_msg.message_id)
+                except Exception:
+                    pass
+        else:
+            if status_msg is not None:
+                try:
+                    bot.edit_message_text(
+                        error, chat_id, status_msg.message_id, parse_mode="HTML"
+                    )
+                    return
+                except Exception:
+                    pass
+            bot.send_message(chat_id, error, parse_mode="HTML")
+    except Exception as e:
+        logger.error(f"文件流水线异常: {e}")
+        try:
+            bot.send_message(chat_id, f"❌ 文件处理流水线异常: {e}")
+        except Exception:
+            pass
+    finally:
+        _cleanup_dirs([workspace_in, workspace_out])
+
+
+def sweep_workspaces():
+    """启动时清空遗留的文件工作区。
+
+    进程被 kill 或重启时，正在处理的任务走不到清理分支，其工作区会永久留在 /tmp。
+    启动那一刻不可能有任务在飞，因此整体清空是安全的。
+    """
+    removed = 0
+    for sub in ("in", "out"):
+        root = os.path.join(WORKSPACE_ROOT, sub)
+        if not os.path.isdir(root):
+            continue
+        for name in os.listdir(root):
+            path = os.path.join(root, name)
+            if not os.path.isdir(path):
+                continue
             try:
-                if os.path.exists(workspace_in): shutil.rmtree(workspace_in)
-                if os.path.exists(workspace_out): shutil.rmtree(workspace_out)
-            except:
-                pass
-                
-    threading.Thread(target=process_task).start()
+                shutil.rmtree(path)
+                removed += 1
+            except Exception as e:
+                logger.warning(f"清理遗留工作区 {path} 失败: {e}")
+    if removed:
+        logger.info(f"🧹 启动清扫：已回收 {removed} 个遗留文件工作区")
+
+
+def _cleanup_dirs(dirs):
+    for d in dirs or []:
+        if d and os.path.exists(d):
+            try:
+                shutil.rmtree(d)
+            except Exception as e:
+                logger.warning(f"清理工作区 {d} 失败: {e}")
+
 
 def execute_agy_prompt(
-    bot, message, prompt, get_user_state_fn, save_user_states_fn, attached_file=None, workspaces=None
+    bot,
+    message,
+    prompt,
+    get_user_state_fn,
+    save_user_states_fn,
+    attached_files=None,
+    cleanup_dirs=None,
 ):
     """主执行逻辑：含 4秒 typing 守护线程与离线进程管理"""
     chat_id = message.chat.id
@@ -204,8 +275,16 @@ def execute_agy_prompt(
         env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
         final_prompt = prompt
-        if attached_file and "[系统文件注入]" not in prompt:
-            final_prompt = f"[{prompt}] 请读取并结合此附件文件进行分析或回答：{attached_file}"
+        if attached_files:
+            joined = "\n".join(f"  - {p}" for p in attached_files)
+            final_prompt = (
+                f"{prompt}\n\n请读取并结合以下附件文件进行分析或回答：\n{joined}"
+            )
+
+        # 串行化同一用户的 agy 调用：conv_id 的读取、进程执行与回写必须原子完成，
+        # 否则并发的两次调用会往同一个会话里塞两份 prompt，或各自绑定到不同的会话。
+        conv_lock = _get_conv_lock(message.from_user.id)
+        conv_lock.acquire()
 
         cmd = [AGY_BIN, "--dangerously-skip-permissions"]
 
@@ -314,9 +393,8 @@ def execute_agy_prompt(
                     chat_id, reply_text, parse_mode="HTML", reply_markup=tts_markup
                 )
 
-            # 思路 1: 若用户启用了 auto_voice 且满足短文无代码块条件，且非系统自动注入的文件处理任务，自动发送语音泡泡
-            is_file_task = workspaces is not None or "[系统文件注入]" in prompt
-            if state.get("auto_voice", False) and not is_file_task:
+            # 思路 1: 若用户启用了 auto_voice 且满足短文无代码块条件，自动发送语音泡泡
+            if state.get("auto_voice", False):
                 can_speak, cleaned = should_auto_speak(output)
                 if can_speak and cleaned:
 
@@ -347,34 +425,10 @@ def execute_agy_prompt(
                 chat_id, f"❌ <b>调用 agy 失败：</b> {e}", parse_mode="HTML"
             )
         finally:
+            conv_lock.release()
             stop_typing.set()
             typing_thread.join(timeout=1)
-            if attached_file and os.path.exists(attached_file):
-                try:
-                    os.remove(attached_file)
-                except Exception:
-                    pass
-
-            if workspaces:
-                out_dir = workspaces.get("out")
-                if out_dir and os.path.exists(out_dir):
-                    try:
-                        for f_name in os.listdir(out_dir):
-                            f_path = os.path.join(out_dir, f_name)
-                            if os.path.isfile(f_path):
-                                bot.send_chat_action(chat_id, "upload_document")
-                                with open(f_path, "rb") as out_f:
-                                    bot.send_document(chat_id, out_f, reply_to_message_id=message.message_id)
-                    except Exception as e:
-                        logger.error(f"发送产出文件失败: {e}")
-                
-                try:
-                    if workspaces.get("in") and os.path.exists(workspaces.get("in")):
-                        shutil.rmtree(workspaces.get("in"))
-                    if out_dir and os.path.exists(out_dir):
-                        shutil.rmtree(out_dir)
-                except Exception as e:
-                    logger.error(f"清理临时工作区失败: {e}")
+            _cleanup_dirs(cleanup_dirs)
 
     threading.Thread(target=process).start()
 
@@ -387,6 +441,7 @@ def register_agy_handlers(
     get_main_keyboard_fn,
 ):
     """注册 Layer 3 AGY AI 指令与交互处理器"""
+    sweep_workspaces()
 
     @bot.message_handler(commands=["chat"])
     def handle_chat(message):
@@ -689,6 +744,267 @@ def register_agy_handlers(
 
             threading.Thread(target=process_tts).start()
 
+    def _reject_oversize(message, size_bytes):
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+        bot.send_message(
+            message.chat.id,
+            f"⚠️ <b>文件过大 ({size_mb} MB)</b>\n"
+            f"──────────────────────\n"
+            f"Telegram 官方标准 Bot API 限制单文件接收不能超过 <b>20MB</b>。\n"
+            f"💡 <b>破局方案</b>：您可以在文字中附带文件的外部下载链接，让 AGY 自己通过 <code>wget</code> 或 <code>curl</code> 下载处理。",
+            parse_mode="HTML",
+            reply_to_message_id=message.message_id,
+        )
+
+    def _launch_file_task(message, workspace_in, workspace_out, caption, context=""):
+        """意图判定后分流：物理处理走流水线，视觉问答走主对话链路。"""
+        try:
+            file_paths = sorted(
+                os.path.join(workspace_in, f)
+                for f in os.listdir(workspace_in)
+                if os.path.isfile(os.path.join(workspace_in, f))
+            )
+        except OSError:
+            file_paths = []
+
+        if not file_paths:
+            logger.warning(f"工作区 {workspace_in} 为空，放弃本次任务")
+            _cleanup_dirs([workspace_in, workspace_out])
+            return
+
+        st = get_user_state_fn(message.from_user.id)
+        model = st.get("model", "gemini-3.6-flash-high")
+        names = [os.path.basename(p) for p in file_paths]
+
+        def job():
+            is_processing, how = classify_intent(caption, names, model)
+            logger.info(
+                f"意图判定 → {'物理处理' if is_processing else '视觉问答'} "
+                f"(via {how}) | caption={caption!r} | files={names}"
+            )
+            if is_processing:
+                # 转发件的原始 caption 对生成命令没有价值，只会干扰 Planner
+                run_file_task(
+                    bot, message, file_paths, workspace_in, workspace_out, caption, model
+                )
+            else:
+                default_q = (
+                    "请详细描述这些文件的内容，若包含代码或报错信息请指出并解释。"
+                    if len(file_paths) > 1
+                    else "请详细描述这个文件的内容，若包含代码或报错信息请指出并解释。"
+                )
+                prompt = caption or default_q
+                if context:
+                    prompt += f"\n\n（该文件为转发内容，原始附带说明：{context}）"
+                execute_agy_prompt(
+                    bot,
+                    message,
+                    prompt,
+                    get_user_state_fn,
+                    save_user_states_fn,
+                    attached_files=file_paths,
+                    cleanup_dirs=[workspace_in, workspace_out],
+                )
+
+        threading.Thread(target=job).start()
+
+    def _batch_launch(uid):
+        """结算一批文件，交给意图判定分流。"""
+        with file_batches_lock:
+            batch = file_batches.get(uid)
+            if not batch or batch["fired"] or batch["downloading"] > 0:
+                return
+            batch["fired"] = True
+            file_batches.pop(uid, None)
+            if batch["timer"]:
+                batch["timer"].cancel()
+        _launch_file_task(
+            batch["message"], batch["in"], batch["out"],
+            batch["caption"], batch["context"],
+        )
+
+    def _arm_batch_locked(uid):
+        """重排结算定时器。必须在持有 file_batches_lock 时调用。
+
+        等待时间按"距最后一个文件落地已过去多久"折算，而不是每次重排都从头
+        再等一遍固定窗口 —— 否则用户补完指令后还要空等一个相册窗口才开工。
+        """
+        batch = file_batches.get(uid)
+        if not batch or batch["fired"] or batch["downloading"] > 0:
+            return  # 还有分片在下载，等最后一个下载完再排
+
+        elapsed = time.time() - batch["last_file_at"]
+        # 相册还可能有后续分片
+        group_wait = (
+            max(0.0, MEDIA_GROUP_WINDOW - elapsed) if batch["group_id"] else 0.0
+        )
+        # 还没拿到指令，再给用户一点时间补一句
+        caption_wait = (
+            0.0 if batch["caption"] else max(0.0, FILE_CAPTION_WINDOW - elapsed)
+        )
+        delay = max(0.05, group_wait, caption_wait)
+
+        if batch["timer"]:
+            batch["timer"].cancel()
+        batch["timer"] = threading.Timer(delay, _batch_launch, args=(uid,))
+        batch["timer"].start()
+
+    def _claim_batch(message):
+        """文本消息认领待定的文件批次，作为它的指令。
+
+        与旧实现的关键差别：批次在**下载开始之前**就已登记，所以下载那几秒里
+        到达的评论也能认领得到。旧实现要等下载完才登记驻留槽位，那段窗口里
+        评论两头都够不着，只能作为独立对话请求发出去。
+        """
+        uid = message.from_user.id
+        text = (message.text or "").strip()
+        if not text:
+            return False
+        with file_batches_lock:
+            batch = file_batches.get(uid)
+            if not batch or batch["fired"]:
+                return False
+            batch["caption"] = text
+            logger.info(f"文本 {text!r} 认领了待定的文件批次")
+            _arm_batch_locked(uid)  # 下载未完时此调用是空操作，由下载收尾负责排期
+        return True
+
+    def _claim_recent_text(user_id):
+        """文件到达时反向吸收刚入防抖队列的文本（文本先到的情形）。
+
+        Telegram 的"转发+评论"会把评论和内容拆成两条消息，且**评论先到**。
+        评论会先进文本防抖队列，随后到达的文件若不把它吸收过来，两者就会
+        各自发起一次请求，并发写同一个 conversation。
+        """
+        with user_buffers_lock:
+            buf = user_buffers.get(user_id)
+            if not buf:
+                return ""
+            # 只吸收刚刚到达的文本，避免把无关的上一句闲聊误当成文件指令
+            if time.time() - buf.get("created_at", 0) > TEXT_ABSORB_MAX_AGE:
+                return ""
+            if buf["timer"]:
+                buf["timer"].cancel()
+            del user_buffers[user_id]
+            return "\n".join(buf["messages"]).strip()
+
+    def _ingest_file(message, file_id, preferred_name, known_size=0):
+        """把文件并入该用户当前的"文件批次"，下载完成后由批次统一结算。
+
+        两条铁律：
+        1. **批次必须在下载开始之前登记**。下载是阻塞的网络 I/O，可能耗时数秒，
+           而这几秒里到达的评论若找不到可认领的对象，就只能作为独立对话请求
+           发出去 —— 于是一次操作收到两条互不相干的回复。
+        2. 相册（media group）的每张图是独立 message，必须按 group_id 归入
+           同一批次、同一工作区，否则"拼接/长图"这类多图任务不可能成功。
+        """
+        if known_size and known_size > MAX_TG_FILE_SIZE:
+            _reject_oversize(message, known_size)
+            return
+
+        uid = message.from_user.id
+        group_id = message.media_group_id
+
+        # 转发件会把**原作者写的 caption** 一并带过来，那不是你的指令。
+        # 你的指令是 TG 拆出去的那条独立评论消息。把原 caption 降级为上下文。
+        own_caption = (message.caption or "").strip()
+        if message.forward_origin:
+            context, caption = own_caption, ""
+        else:
+            context, caption = "", own_caption
+
+        key = group_id if group_id else f"{message.message_id}_{int(time.time())}"
+        stale = None
+
+        with file_batches_lock:
+            batch = file_batches.get(uid)
+            if batch and batch["group_id"] != group_id and batch["downloading"] == 0:
+                # 与上一批无关的新文件：先让旧批按现状发车，不要混进来
+                if not batch["fired"]:
+                    batch["fired"] = True
+                    if batch["timer"]:
+                        batch["timer"].cancel()
+                    stale = batch
+                file_batches.pop(uid, None)
+                batch = None
+
+            if batch is None:
+                batch = {
+                    "message": message,
+                    "group_id": group_id,
+                    "in": os.path.join(WORKSPACE_ROOT, "in", key),
+                    "out": os.path.join(WORKSPACE_ROOT, "out", key),
+                    "caption": "",
+                    "context": "",
+                    "downloading": 0,
+                    "last_file_at": time.time(),
+                    "timer": None,
+                    "fired": False,
+                }
+                file_batches[uid] = batch
+                # 文本先到的情形（转发+评论：评论先发、内容后发）：
+                # 把刚进防抖队列的评论吸收过来，别让它自己发一次
+                absorbed = _claim_recent_text(uid)
+                if absorbed:
+                    batch["caption"] = absorbed
+                    logger.info(f"文件批次吸收了刚到达的文本作为指令: {absorbed!r}")
+
+            if caption:
+                batch["caption"] = caption
+            if context and not batch["context"]:
+                batch["context"] = context
+            # 用组内最早的 message 作为回复锚点，回传时挂在相册头部
+            if message.message_id < batch["message"].message_id:
+                batch["message"] = message
+
+            batch["downloading"] += 1
+            if batch["timer"]:
+                batch["timer"].cancel()
+                batch["timer"] = None
+            workspace_in, workspace_out = batch["in"], batch["out"]
+
+        if stale:
+            threading.Thread(
+                target=_launch_file_task,
+                args=(stale["message"], stale["in"], stale["out"],
+                      stale["caption"], stale["context"]),
+            ).start()
+
+        def finish_download(blob):
+            """落盘并把 downloading 计数归还，随后重排结算定时器。"""
+            with file_batches_lock:
+                if blob is not None:
+                    os.makedirs(workspace_in, exist_ok=True)
+                    os.makedirs(workspace_out, exist_ok=True)
+                    existing = [
+                        f for f in os.listdir(workspace_in)
+                        if os.path.isfile(os.path.join(workspace_in, f))
+                    ]
+                    base = preferred_name or f"photo_{len(existing) + 1:02d}.jpg"
+                    if os.path.exists(os.path.join(workspace_in, base)):
+                        root, ext = os.path.splitext(base)
+                        base = f"{root}_{len(existing) + 1:02d}{ext}"
+                    with open(os.path.join(workspace_in, base), "wb") as fh:
+                        fh.write(blob)
+                batch["downloading"] -= 1
+                if blob is not None:
+                    batch["last_file_at"] = time.time()
+                _arm_batch_locked(uid)
+
+        try:
+            file_info = bot.get_file(file_id)
+            blob = bot.download_file(file_info.file_path)
+        except Exception:
+            finish_download(None)
+            raise
+
+        if len(blob) > MAX_TG_FILE_SIZE:
+            finish_download(None)
+            _reject_oversize(message, len(blob))
+            return
+
+        finish_download(blob)
+
     @bot.message_handler(content_types=["photo"])
     def handle_photo(message):
         if message.from_user.id != allowed_user_id:
@@ -699,54 +1015,12 @@ def register_agy_handlers(
 
         bot.send_chat_action(message.chat.id, "typing")
         try:
-            fileID = message.photo[-1].file_id
-            file_info = bot.get_file(fileID)
-            downloaded_file = bot.download_file(file_info.file_path)
-
-            msg_id = f"{message.message_id}_{int(time.time())}"
-            workspace_in = f"/tmp/tg_files/in/{msg_id}"
-            workspace_out = f"/tmp/tg_files/out/{msg_id}"
-            os.makedirs(workspace_in, exist_ok=True)
-            os.makedirs(workspace_out, exist_ok=True)
-
-            tmp_path = os.path.join(workspace_in, f"photo_{int(time.time())}.jpg")
-            with open(tmp_path, "wb") as new_file:
-                new_file.write(downloaded_file)
-
-            file_size = getattr(file_info, "file_size", len(downloaded_file))
-            size_mb = round(file_size / (1024 * 1024), 2)
-            
-            if file_size > 20 * 1024 * 1024:
-                bot.send_message(
-                    message.chat.id,
-                    f"⚠️ <b>文件过大 ({size_mb} MB)</b>\n"
-                    f"──────────────────────\n"
-                    f"Telegram 官方标准 Bot API 限制单文件接收不能超过 <b>20MB</b>。\n"
-                    f"💡 <b>破局方案</b>：您可以在文字中附带文件的外部下载链接，让 AGY 自己通过 <code>wget</code> 或 <code>curl</code> 下载处理。",
-                    parse_mode="HTML",
-                    reply_to_message_id=message.message_id
-                )
-                return
-            
-            caption = message.caption
-
-            if check_intent_is_file_processing(caption, "image.jpg"):
-                generate_and_execute_file_commands(
-                    bot, message, tmp_path, workspace_in, workspace_out, caption, get_user_state_fn
-                )
-            else:
-                prompt = caption or "请详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
-                try:
-                    import shutil
-                    if os.path.exists(workspace_out):
-                        shutil.rmtree(workspace_out)
-                except Exception:
-                    pass
-                execute_agy_prompt(
-                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
-                    attached_file=tmp_path, workspaces=None
-                )
+            photo = message.photo[-1]
+            _ingest_file(
+                message, photo.file_id, None, getattr(photo, "file_size", 0) or 0
+            )
         except Exception as e:
+            logger.error(f"处理图片失败: {e}")
             bot.send_message(
                 message.chat.id,
                 f"❌ 处理图片失败: {e}",
@@ -783,70 +1057,32 @@ def register_agy_handlers(
 
         bot.send_chat_action(message.chat.id, "upload_document")
         try:
-            if message.content_type == "document":
-                file_info_obj = message.document
-            elif message.content_type == "video":
-                file_info_obj = message.video
-            elif message.content_type == "audio":
-                file_info_obj = message.audio
-            elif message.content_type == "video_note":
-                file_info_obj = message.video_note
-            else:
+            file_obj = {
+                "document": message.document,
+                "video": message.video,
+                "audio": message.audio,
+                "video_note": message.video_note,
+            }.get(message.content_type)
+            if file_obj is None:
                 return
 
-            file_id = file_info_obj.file_id
-            file_size = getattr(file_info_obj, "file_size", 0)
-            size_mb = round(file_size / (1024 * 1024), 2)
-
-            if file_size > 20 * 1024 * 1024:
-                bot.send_message(
-                    message.chat.id,
-                    f"⚠️ <b>文件过大 ({size_mb} MB)</b>\n"
-                    f"──────────────────────\n"
-                    f"Telegram 官方标准 Bot API 限制单文件接收不能超过 <b>20MB</b>。\n"
-                    f"💡 <b>破局方案</b>：您可以在文字中附带文件的外部下载链接，让 AGY 自己通过 <code>wget</code> 或 <code>curl</code> 下载处理。",
-                    parse_mode="HTML",
-                    reply_to_message_id=message.message_id
-                )
-                return
-
-            file_name = getattr(file_info_obj, "file_name", None)
+            file_name = getattr(file_obj, "file_name", None)
             if not file_name:
-                ext = ".mp4" if message.content_type in ["video", "video_note"] else ".ogg" if message.content_type == "audio" else ".bin"
+                ext = {
+                    "video": ".mp4",
+                    "video_note": ".mp4",
+                    "audio": ".ogg",
+                }.get(message.content_type, ".bin")
                 file_name = f"file_{int(time.time())}{ext}"
 
-            file_info = bot.get_file(file_id)
-            downloaded_file = bot.download_file(file_info.file_path)
-
-            msg_id = f"{message.message_id}_{int(time.time())}"
-            workspace_in = f"/tmp/tg_files/in/{msg_id}"
-            workspace_out = f"/tmp/tg_files/out/{msg_id}"
-            os.makedirs(workspace_in, exist_ok=True)
-            os.makedirs(workspace_out, exist_ok=True)
-
-            tmp_path = os.path.join(workspace_in, file_name)
-            with open(tmp_path, "wb") as new_file:
-                new_file.write(downloaded_file)
-
-            caption = message.caption or ""
-
-            if check_intent_is_file_processing(caption, file_name) or not caption:
-                generate_and_execute_file_commands(
-                    bot, message, tmp_path, workspace_in, workspace_out, caption or "按照格式做相应压缩/规范化处理", get_user_state_fn
-                )
-            else:
-                prompt = caption or f"请读取并分析附件文件：{file_name}"
-                try:
-                    import shutil
-                    if os.path.exists(workspace_out):
-                        shutil.rmtree(workspace_out)
-                except Exception:
-                    pass
-                execute_agy_prompt(
-                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
-                    attached_file=tmp_path, workspaces=None
-                )
+            _ingest_file(
+                message,
+                file_obj.file_id,
+                os.path.basename(file_name),
+                getattr(file_obj, "file_size", 0) or 0,
+            )
         except Exception as e:
+            logger.error(f"文件接收失败: {e}")
             bot.send_message(
                 message.chat.id,
                 f"❌ 文件接收失败: {e}",
@@ -913,6 +1149,10 @@ def register_agy_handlers(
         if not st.get("in_chat", False):
             return False
 
+        # 刚发了文件还没给指令？这句文字就是它的指令，不另起一次会话请求
+        if _claim_batch(message):
+            return True
+
         forward_prefix = ""
         if message.forward_origin:
             origin = message.forward_origin
@@ -928,6 +1168,7 @@ def register_agy_handlers(
                     "messages": [],
                     "timer": None,
                     "has_forward": False,
+                    "created_at": time.time(),
                 }
 
             if message.forward_origin:

@@ -12,15 +12,19 @@
 
 **标准执行命令**:
 ```bash
-# 假设环境变量 INPUT 为输入视频路径，OUTPUT 为输出 GIF 路径
+# 占位符必须替换成任务给定的真实绝对路径。
+# 调色板放在输出目录下（不要用 /tmp/palette.png 这种固定名，并发任务会互相覆盖）
 # 1. 生成全局调色板
-ffmpeg -v warning -i "$INPUT" -vf "fps=12,scale=720:-1:flags=lanczos,palettegen" -y /tmp/palette.png
+ffmpeg -v warning -i <输入绝对路径> -vf "fps=12,scale=720:-1:flags=lanczos,palettegen" -y <输出目录>/_palette.png
 
 # 2. 使用调色板生成高质量 GIF
-ffmpeg -v warning -i "$INPUT" -i /tmp/palette.png -lavfi "fps=12,scale=720:-1:flags=lanczos [x]; [x][1:v] paletteuse" -y "$OUTPUT"
+ffmpeg -v warning -i <输入绝对路径> -i <输出目录>/_palette.png -lavfi "fps=12,scale=720:-1:flags=lanczos [x]; [x][1:v] paletteuse" -y <输出目录>/<原名>_converted.gif
+
+# 3. 清理调色板
+rm -f <输出目录>/_palette.png
 ```
 
 ## 输出规范
-- 产出文件必须保存在用户请求时分配的 `workspace_out` 目录中。
+- 产出文件必须保存在任务指定的输出目录中。
 - 输出文件名建议格式: `[原文件名]_converted.gif`
-- 完成后删除临时的 `palette.png`。
+- 完成后删除临时调色板文件。
