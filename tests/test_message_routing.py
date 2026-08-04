@@ -78,6 +78,14 @@ def photo(mid, caption=None, group=None, forwarded=False):
         text=None,
         content_type="photo",
         photo=[types.SimpleNamespace(file_id=f"f{mid}", file_size=1000)],
+        # 真实 telebot Message 上这些属性恒存在（未命中时为 None），
+        # handle_any_file 会一次性取全部四个，缺一个就抛 AttributeError
+        document=None,
+        video=None,
+        audio=None,
+        video_note=None,
+        voice=None,
+        sticker=None,
         forward_origin=(
             types.SimpleNamespace(type="user",
                                   sender_user=types.SimpleNamespace(first_name="Eric"))
@@ -314,6 +322,40 @@ def test_handlers_respect_chat_mode(s):
         r.reset()
 
 
+def test_ingest_sanitizes_filename(s):
+    """落盘环节必须真的调用收敛函数 —— 只测工具函数挡不住这个回归。"""
+    r = Rig()
+    r.reset()
+    s.section("恶意文件名落盘时被中和")
+    evil = "report;touch PWNED_MARKER;.pdf"
+    r.bot.handlers["handle_any_file"](document(60, name=evil))
+    time.sleep(0.2)
+
+    with ah.file_batches_lock:
+        batch = ah.file_batches.get(42)
+        workspace = batch["in"] if batch else None
+    s.truthy("批次已建立", workspace is not None)
+
+    on_disk = sorted(os.listdir(workspace)) if workspace else []
+    s.check("落盘 1 个文件", len(on_disk), 1)
+    name = on_disk[0] if on_disk else ""
+    s.check("磁盘上的文件名不含 shell 元字符",
+            sorted(set(name) & set(";|&$`()<>*?'\" ")), [])
+    s.truthy("扩展名保留", name.endswith(".pdf"))
+    s.check("原始危险名未落盘", name == evil, False)
+
+    s.section("正常文件名不受影响")
+    r.reset()
+    r.bot.handlers["handle_any_file"](document(61, name="季度报告.pdf"))
+    time.sleep(0.2)
+    with ah.file_batches_lock:
+        batch = ah.file_batches.get(42)
+        workspace = batch["in"] if batch else None
+    on_disk = sorted(os.listdir(workspace)) if workspace else []
+    s.check("中文文件名原样保留", on_disk, ["季度报告.pdf"])
+    r.reset()
+
+
 def test_conversation_isolation(s):
     s.section("内部会话不得污染 /history 与 conv_id")
     s.truthy("Planner prompt 带内部标记",
@@ -353,6 +395,7 @@ SUITES = [
     ("下载期间到达", test_text_during_download),
     ("caption 归属", test_caption_ownership),
     ("对话模式守卫", test_handlers_respect_chat_mode),
+    ("落盘文件名收敛", test_ingest_sanitizes_filename),
     ("会话隔离", test_conversation_isolation),
     ("工作区清扫", test_workspace_sweep),
 ]

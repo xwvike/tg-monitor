@@ -92,6 +92,30 @@ QA_PHRASES = [
 ]
 
 
+_UNSAFE_NAME_CHARS = re.compile(r"[^\w.\-]", re.UNICODE)
+
+
+def safe_filename(name, fallback="file"):
+    """把外部提供的文件名收敛成 shell 安全的形式。
+
+    execute_commands 以 shell=True 执行 Planner 生成的命令，而输入文件的
+    **绝对路径会原样出现在命令里**。文件名中的 `;` `$()` 反引号 `|` `&`
+    会被 shell 解释 —— 用户只要转发一个来自频道的恶意命名文件即可触发
+    任意命令执行。os.path.basename() 只挡路径穿越，不挡元字符。
+
+    保留中日韩等文字（它们不是 shell 元字符），其余一律替换为下划线。
+    """
+    name = os.path.basename(str(name or "")).strip()
+    stem, ext = os.path.splitext(name)
+
+    ext = "." + _UNSAFE_NAME_CHARS.sub("", ext.lstrip("."))[:16] if ext else ""
+    stem = _UNSAFE_NAME_CHARS.sub("_", stem)[:80].strip("._-")
+
+    if not stem:
+        stem = fallback
+    return f"{stem}{ext if ext != '.' else ''}"
+
+
 def agy_env():
     """构造调用 agy 及执行工具命令时的环境变量。
 

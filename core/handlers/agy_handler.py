@@ -29,6 +29,7 @@ from core.file_pipeline import (
     agy_env,
     classify_intent,
     plan_and_execute,
+    safe_filename,
 )
 from core.stt import transcribe_voice_file
 from core.tg_format import esc
@@ -978,7 +979,12 @@ def register_agy_handlers(
                         f for f in os.listdir(workspace_in)
                         if os.path.isfile(os.path.join(workspace_in, f))
                     ]
-                    base = preferred_name or f"photo_{len(existing) + 1:02d}.jpg"
+                    # 文件名会原样进入 Planner 生成的 shell 命令，必须先收敛
+                    base = (
+                        safe_filename(preferred_name, f"file_{len(existing) + 1:02d}")
+                        if preferred_name
+                        else f"photo_{len(existing) + 1:02d}.jpg"
+                    )
                     if os.path.exists(os.path.join(workspace_in, base)):
                         root, ext = os.path.splitext(base)
                         base = f"{root}_{len(existing) + 1:02d}{ext}"
