@@ -55,6 +55,8 @@ def get_brain_conversations():
     return conversations
 
 
+import re
+
 def check_intent_is_file_processing(caption, file_name):
     if not caption:
         return False
@@ -87,6 +89,91 @@ def check_intent_is_file_processing(caption, file_name):
         logger.error(f"意图识别失败: {e}")
         return False
 
+
+def generate_and_execute_file_commands(bot, message, tmp_path, workspace_in, workspace_out, caption, get_user_state_fn):
+    chat_id = message.chat.id
+    bot.send_message(chat_id, "⚙️ 识别到文件处理意图，正在规划执行步骤...", reply_to_message_id=message.message_id)
+    
+    state = get_user_state_fn(message.from_user.id)
+    model = state.get("model", "gemini-3.6-pro")
+    
+    prompt = (
+        f"你是一个专门用于生成文件处理命令的智能 Planner。\n"
+        f"输入文件路径: {tmp_path}\n"
+        f"目标输出目录: {workspace_out}\n"
+        f"用户的处理需求: {caption}\n\n"
+        f"任务指南:\n"
+        f"1. 务必先调用工具查阅 config/TOOLCHAIN.md 与 config/file_recipes/ 来决定最佳工具命令（如 ffmpeg, convert）。\n"
+        f"2. 决定后，生成一组能够在 linux bash 环境中执行的命令序列，这些命令必须能完成任务并将最终结果保存到 {workspace_out} 目录下。\n"
+        f"3. 严禁直接读取解析文件内容给用户看！\n"
+        f"4. 将最终的命令序列严格组装成一个 JSON 字符串数组，并必须用 <json> 和 </json> 标签包裹。\n"
+        f"示例: <json>[\"convert {tmp_path} -resize 50% {workspace_out}/out.jpg\"]</json>"
+    )
+    
+    cmd = [
+        AGY_BIN,
+        "--model", model,
+        "--dangerously-skip-permissions",
+        "-p", prompt
+    ]
+    
+    def process_task():
+        try:
+            env = os.environ.copy()
+            env["HTTP_PROXY"] = "http://127.0.0.1:10809"
+            env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
+            local_bin = os.path.expanduser("~/.local/bin")
+            env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+            
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+            output = res.stdout.strip()
+            
+            match = re.search(r"<json>(.*?)</json>", output, re.DOTALL)
+            if not match:
+                logger.error(f"无法提取JSON: {output}")
+                bot.send_message(chat_id, "❌ 规划失败，AGY 未能输出合法的处理步骤格式。")
+                return
+                
+            json_str = match.group(1).strip()
+            commands = json.loads(json_str)
+            if not isinstance(commands, list):
+                raise ValueError("解析到的 JSON 不是一个数组")
+                
+            if len(commands) == 0:
+                bot.send_message(chat_id, "⚠️ AGY 规划了空命令，无法处理。")
+                return
+                
+            bot.send_message(chat_id, f"🚀 开始执行 {len(commands)} 步处理命令...")
+            for i, bash_cmd in enumerate(commands):
+                subprocess.run(bash_cmd, shell=True, check=True, executable="/bin/bash")
+                
+            files_sent = 0
+            for f_name in os.listdir(workspace_out):
+                f_path = os.path.join(workspace_out, f_name)
+                if os.path.isfile(f_path):
+                    bot.send_chat_action(chat_id, "upload_document")
+                    with open(f_path, "rb") as out_f:
+                        bot.send_document(chat_id, out_f, reply_to_message_id=message.message_id)
+                    files_sent += 1
+                    
+            if files_sent == 0:
+                bot.send_message(chat_id, "⚠️ 处理完成，但未在输出目录生成任何文件。")
+                
+        except json.JSONDecodeError:
+            bot.send_message(chat_id, "❌ 解析命令失败，AGY 吐出了不标准的 JSON。")
+        except subprocess.CalledProcessError as e:
+            bot.send_message(chat_id, f"❌ 执行工具命令时报错，请检查文件或描述是否正确。\n错误代码: {e.returncode}")
+        except Exception as e:
+            bot.send_message(chat_id, f"❌ 处理发生未知错误: {e}")
+        finally:
+            import shutil
+            try:
+                if os.path.exists(workspace_in): shutil.rmtree(workspace_in)
+                if os.path.exists(workspace_out): shutil.rmtree(workspace_out)
+            except:
+                pass
+                
+    threading.Thread(target=process_task).start()
 
 def execute_agy_prompt(
     bot, message, prompt, get_user_state_fn, save_user_states_fn, attached_file=None, workspaces=None
@@ -644,21 +731,8 @@ def register_agy_handlers(
             caption = message.caption
 
             if check_intent_is_file_processing(caption, "image.jpg"):
-                bot.send_chat_action(message.chat.id, "upload_document")
-                prompt = (
-                    f"[系统文件注入] 用户上传了图片，并附带了明确处理指令。\n"
-                    f"▶️ 文件路径: {tmp_path}\n"
-                    f"▶️ 文件大小: {size_mb} MB\n"
-                    f"▶️ 预期输出目录: {workspace_out}\n"
-                    f"▶️ 用户指令: {caption}\n\n"
-                    f"🚨 【最高优先级操作规范】:\n"
-                    f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
-                    f"2. 根据【用户指令】，在终端执行相应的命令（如 convert, pngquant 等）处理该文件。\n"
-                    f"3. 必须产出真实文件到 {workspace_out} 目录。系统会自动回传给用户。\n"
-                )
-                execute_agy_prompt(
-                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
-                    attached_file=tmp_path, workspaces={"in": workspace_in, "out": workspace_out}
+                generate_and_execute_file_commands(
+                    bot, message, tmp_path, workspace_in, workspace_out, caption, get_user_state_fn
                 )
             else:
                 prompt = caption or "请详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
@@ -757,21 +831,8 @@ def register_agy_handlers(
             caption = message.caption or ""
 
             if check_intent_is_file_processing(caption, file_name) or not caption:
-                bot.send_chat_action(message.chat.id, "upload_document")
-                prompt = (
-                    f"[系统文件注入] 用户上传了文件，请求进行处理。\n"
-                    f"▶️ 文件路径: {tmp_path}\n"
-                    f"▶️ 文件大小: {size_mb} MB\n"
-                    f"▶️ 预期输出目录: {workspace_out}\n"
-                    f"▶️ 用户指令: {caption}\n\n"
-                    f"🚨 【最高优先级操作规范】:\n"
-                    f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
-                    f"2. 根据【用户指令】，使用终端工具（如 ffmpeg, convert, pandoc 等）对文件进行实际的物理处理。\n"
-                    f"3. 必须产出真实文件到 {workspace_out} 目录。系统会自动回传给用户。\n"
-                )
-                execute_agy_prompt(
-                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
-                    attached_file=tmp_path, workspaces={"in": workspace_in, "out": workspace_out}
+                generate_and_execute_file_commands(
+                    bot, message, tmp_path, workspace_in, workspace_out, caption or "按照格式做相应压缩/规范化处理", get_user_state_fn
                 )
             else:
                 prompt = caption or f"请读取并分析附件文件：{file_name}"
