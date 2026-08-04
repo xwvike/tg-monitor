@@ -131,7 +131,56 @@ def test_toolchain_trim_keeps_file_tools(s):
         s.check(f"已剔除 {noise}", noise in trimmed, False)
 
 
+def test_docs_reference_real_files(s):
+    """文档里以反引号引用的项目文件必须真实存在。"""
+    s.section("文档引用的路径")
+    pattern = re.compile(
+        r"`((?:core|tests|config|jobs|bin)/[A-Za-z0-9_./-]+\.(?:py|md|sh|yaml|json))`"
+    )
+    for doc in ("README.md", "GEMINI.md", "ARCHITECTURE.md"):
+        doc_path = os.path.join(PROJECT_DIR, doc)
+        if not os.path.exists(doc_path):
+            continue
+        for rel in sorted(set(pattern.findall(_read(doc_path)))):
+            s.check(f"{doc} → {rel}", os.path.exists(os.path.join(PROJECT_DIR, rel)), True)
+
+
+def test_snapshot_manifest_consistency(s):
+    """打包清单与还原时清空的受控目录必须一致，且被文档如实描述。
+
+    两者不一致时，还原后会出现"旧代码 + 新测试"这类自相矛盾的组合。
+    """
+    manage = _read(os.path.join(PROJECT_DIR, "bin", "manage.sh"))
+    packed = set(re.search(r"for item in ([^;]+); do", manage).group(1).split())
+    packed_dirs = {x for x in packed if "." not in x}
+    wiped = set(re.findall(r'"\$PROJECT_DIR/(\w+)"', manage))
+
+    s.section("打包 / 清空 / 文档 三方一致")
+    s.check("受控清空目录 == 打包目录", packed_dirs == wiped, True)
+    for doc in ("README.md", "GEMINI.md"):
+        body = _read(os.path.join(PROJECT_DIR, doc))
+        for d in sorted(packed_dirs):
+            s.check(f"{doc} 描述了快照含 {d}/", f"`{d}/`" in body, True)
+
+
+def test_sandbox_level_count_matches_docs(s):
+    """沙箱校验的级数在代码与文档中必须一致。"""
+    bot_src = _read(os.path.join(PROJECT_DIR, "core", "bot.py"))
+    totals = {m[1] for m in re.findall(r"\[(\d)/(\d)\]", bot_src)}
+
+    s.section("级数一致")
+    s.check("bot.py 中级数唯一", len(totals), 1)
+    total = totals.pop() if totals else "?"
+    for doc in ("README.md", "GEMINI.md"):
+        body = _read(os.path.join(PROJECT_DIR, doc))
+        s.check(f"{doc} 无过期的'三级'表述", "三级" in body, False)
+        s.check(f"{doc} 提及 {total} 级校验", f"{total} 级" in body or f"[2/{total}]" in body, True)
+
+
 SUITES = [
+    ("文档引用完整性", test_docs_reference_real_files),
+    ("快照清单一致性", test_snapshot_manifest_consistency),
+    ("沙箱级数一致性", test_sandbox_level_count_matches_docs),
     ("入口函数一致性", test_python_entrypoints_exist),
     ("二进制覆盖", test_declared_binaries_are_installable),
     ("菜谱命令可解析", test_recipes_reference_real_tools),

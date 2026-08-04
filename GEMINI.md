@@ -7,19 +7,34 @@
 - **核心逻辑 (`core/`)**:
   - `core/bot.py`: Telegram 机器人 Layer 0 微内核 (动态时间戳版本 vYYYY.MM.DD-HHMM)
   - `core/task_engine.py`: 声明式动态任务调度引擎 (APScheduler + 语法防错 + 热加载)
+  - `core/file_pipeline.py`: **文件处理流水线** —— 意图判定、菜谱检索、元数据探针、
+    Planner 规划、命令执行与错误回喂、产物回收（详见 `ARCHITECTURE.md`）
+  - `core/tg_format.py`: Telegram HTML 转义与安全发送（解析失败自动降级重发）
+  - `core/user_state.py`: 会话状态持久化（原子写 + 线程锁 + 损坏留档）
   - `core/tts.py`: 独立两阶段 TTS 语音合成与 OGG/Opus 转码流水线引擎
   - `core/stt.py`: 独立两阶段 STT 语音识别与 Faster-Whisper 转译流水线引擎
   - `core/handlers/rescue_handler.py`: Layer 1 远程自救与快照管理 Handler
   - `core/handlers/system_handler.py`: Layer 2 硬件诊断、Docker 容器与 Systemctl 健康度 Handler
-  - `core/handlers/agy_handler.py`: Layer 3 AGY AI 对话、多模态、模型/思考深度切换与消息防抖 Handler
+  - `core/handlers/agy_handler.py`: Layer 3 AGY AI 对话、多模态、文件批次聚合与消息防抖 Handler
+- **测试 (`tests/`)**: 零外部依赖的断言套件，由 `tg-bot test` 的 `[2/4]` 执行
+  - `test_rescue.py`: 自救顺序、快照选取、特权适配、安装脚本边界
+  - `test_user_state.py`: 原子写（含 SIGKILL 实测）、损坏留档、线程安全
+  - `test_tg_format.py`: HTML 转义、发送兜底、源码静态扫描
+  - `test_toolchain_doc.py`: TOOLCHAIN.md 与代码 / install.sh 的一致性
+  - `test_file_pipeline.py`: 意图判定、菜谱、执行层、编排回喂、文件名注入防护
+  - `test_message_routing.py`: 文件/文本三种到达顺序、caption 归属、会话隔离
 - **配置与持久化 (`config/`)**:
   - `config/tasks.yaml`: 纯声明式定时任务配置表 (不含凭证，凭证由 `.env` 直接提供)
   - `config/user_states.json`: 机器人会话模式、选定 AI 模型与思考深度持久化文件
+  - `config/TOOLCHAIN.md`: 工具链能力地图（**会被内联进 Planner 的 prompt**）
+  - `config/file_recipes/`: 文件处理标准作业手册（由 `RECIPE_INDEX` 在 Python 侧命中）
 - **定时任务与脚本库 (`jobs/`)**:
   - `jobs/auto-maintenance.sh`: 周自动维保脚本 (AGY 更新、Docker prune、日志清理)
   - `jobs/check_claude_rss.py`: Claude Code RSS 监控与 AI 中文翻译脚本
 - **运维与自救工具 (`bin/`)**:
   - `bin/manage.sh`: `tg-bot` 控制与自救工具箱 (映射至 `/usr/local/bin/tg-bot`)
+- **架构文档**:
+  - `ARCHITECTURE.md`: 文件处理架构的演进过程与责任边界速查表
 - **系统快照库 (`releases/snapshots/`)**:
   - 存放项目全量平滑备份快照包 (`snap_YYYYMMDD_HHMM[_tag].tar.gz`)，上限保留 20 个
 - **日志目录 (`logs/`)**:
@@ -35,7 +50,11 @@
 ### 1. 修改代码前的快照备份机制
 任何大型改动、重构或部署前，必须运行：
 `tg-bot backup [tag_name]`
-系统会自动生成包含 `core/`、`config/`、`jobs/`、`bin/`、`requirements.txt` 及文档的轻量快照包，保存于 `releases/snapshots/snap_YYYYMMDD_HHMM[_tag].tar.gz`。
+系统会自动生成包含 `core/`、`config/`、`jobs/`、`bin/`、`tests/`、`install.sh`、
+`requirements.txt` 及文档的轻量快照包，保存于 `releases/snapshots/snap_YYYYMMDD_HHMM[_tag].tar.gz`。
+
+> ⚠️ `create_snapshot` 的打包清单与 `restore_snapshot` 的"受控子目录清空"清单
+> **必须保持一致**，否则还原后会出现"旧代码 + 新测试"这类自相矛盾的组合。
 
 **永久快照保护**: 滚动清理默认上限 20 个。若生成或重命名的快照文件名中包含 `keep` 字样（如 `*_final_keep.tar.gz`），该快照将被视作免死金牌，**永久保存**，不计入滚动清除指标。
 
@@ -75,6 +94,19 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
 
 > ⚠️ 严禁写 `f"<pre>{output}</pre>"` 这类裸插值。
 > `tests/test_tg_format.py` 会静态扫描 `core/` 拦截此类写法。
+
+### 3.05 外部输入进入 shell 的铁律
+`execute_commands` 以 `shell=True` 执行 Planner 生成的命令，输入文件的**绝对路径
+会原样出现在命令中**。因此凡是来自外部的名称（Telegram 提供的 `file_name`、
+解压出来的条目名等）必须先经 `safe_filename()` 收敛。
+
+`os.path.basename()` 只挡路径穿越，**不挡 `;` `$()` 反引号 `|` `&` 这些 shell 元字符** ——
+用户仅仅转发一个来自频道的恶意命名文件即可触发任意命令执行，无需任何主动的危险操作。
+该漏洞曾真实存在并被实测复现。
+
+> 相关但仍存在的风险面：`shell=True` + LLM 生成命令这一组合本身。
+> 已知输入路径（文件名）已收敛；caption 来自用户本人，属可接受风险。
+> 若需更保守，可给执行层加命令白名单（首词限定为已声明工具）。
 
 ### 3.1 部署与可迁移性
 - **线上环境必须完全由 `install.sh` 产出**，禁止手工改 systemd unit。
