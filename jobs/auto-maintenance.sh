@@ -29,8 +29,18 @@ fi
 # 2. Docker system prune
 DOCKER_LOG=$(docker system prune -f 2>&1 | tail -n 5)
 
-# 3. Clean system journal logs (> 14 days)
-JOURNAL_LOG=$(sudo journalctl --vacuum-time=14d 2>&1 | tail -n 2)
+# 3. Clean journal logs (> 14 days)
+# 本脚本由定时引擎无人值守调用，绝不能卡在 sudo 密码提示上。
+# 有免密提权就清理系统日志；没有就退化为只清当前用户的日志，并如实说明。
+if [ "$(id -u)" -eq 0 ]; then
+    JOURNAL_LOG=$(journalctl --vacuum-time=14d 2>&1 | tail -n 2)
+elif sudo -n true 2>/dev/null; then
+    JOURNAL_LOG=$(sudo -n journalctl --vacuum-time=14d 2>&1 | tail -n 2)
+else
+    JOURNAL_LOG=$(journalctl --user --vacuum-time=14d 2>&1 | tail -n 2)
+    JOURNAL_LOG="${JOURNAL_LOG}
+（无免密提权，本次仅清理当前用户日志；系统级日志请在终端执行 sudo journalctl --vacuum-time=14d）"
+fi
 
 echo "[$(date)] Maintenance tasks finished. Sending Telegram notification..."
 

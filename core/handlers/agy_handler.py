@@ -26,10 +26,12 @@ from core.file_pipeline import (
     AUDIO_EXTS,
     INTERNAL_MARKER,
     VIDEO_EXTS,
+    agy_env,
     classify_intent,
     plan_and_execute,
 )
 from core.stt import transcribe_voice_file
+from core.tg_format import esc
 from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_speak
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
@@ -268,11 +270,7 @@ def execute_agy_prompt(
         typing_thread = threading.Thread(target=send_typing_loop)
         typing_thread.start()
 
-        env = os.environ.copy()
-        env["HTTP_PROXY"] = "http://127.0.0.1:10809"
-        env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
-        local_bin = os.path.expanduser("~/.local/bin")
-        env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+        env = agy_env()
 
         final_prompt = prompt
         if attached_files:
@@ -563,7 +561,7 @@ def register_agy_handlers(
             bot.answer_callback_query(call.id, "已成功恢复选中的历史会话！")
             bot.send_message(
                 call.message.chat.id,
-                f"✅ <b>成功切回并恢复会话：</b> <code>{cid[:8]}...</code>\n现在您可以继续与其上下文进行对话了！",
+                f"✅ <b>成功切回并恢复会话：</b> <code>{esc(cid[:8])}...</code>\n现在您可以继续与其上下文进行对话了！",
                 reply_markup=get_main_keyboard_fn(call.from_user.id),
             )
 
@@ -598,7 +596,7 @@ def register_agy_handlers(
             message.chat.id,
             f"🤖 <b>请选择 AGY 当前调用的 AI 模型：</b>\n"
             f"──────────────────────\n"
-            f"📌 <b>当前选定模型</b>: <code>{current_m}</code>",
+            f"📌 <b>当前选定模型</b>: <code>{esc(current_m)}</code>",
             reply_markup=markup,
             parse_mode="HTML",
         )
@@ -630,7 +628,7 @@ def register_agy_handlers(
             message.chat.id,
             f"⚡ <b>请选择 AGY 思考推理深度 (Reasoning Effort)：</b>\n"
             f"──────────────────────\n"
-            f"📌 <b>当前选定级别</b>: <code>{current_e}</code>",
+            f"📌 <b>当前选定级别</b>: <code>{esc(current_e)}</code>",
             reply_markup=markup,
             parse_mode="HTML",
         )
@@ -664,15 +662,15 @@ def register_agy_handlers(
             return
         st = get_user_state_fn(message.from_user.id)
         cid = st.get("conv_id")
-        conv_str = f"<code>{cid}</code>" if cid else "<i>(无 / 新会话)</i>"
+        conv_str = f"<code>{esc(cid)}</code>" if cid else "<i>(无 / 新会话)</i>"
         mode_str = "💬 沉浸对话模式" if st.get("in_chat", False) else "📊 基础监控模式"
         voice_str = "🟢 开启" if st.get("auto_voice", False) else "🔴 关闭 (按需点播)"
 
         msg = (
             "⚙️ <b>AGY 会话配置与全局参数</b>\n"
             "──────────────────────\n"
-            f"🤖 <b>运行 AI 模型</b>: <code>{st.get('model', 'gemini-3.6-flash-high')}</code>\n"
-            f"⚡ <b>思考推理深度</b>: <code>{st.get('effort', 'high')}</code>\n"
+            f"🤖 <b>运行 AI 模型</b>: <code>{esc(st.get('model', 'gemini-3.6-flash-high'))}</code>\n"
+            f"⚡ <b>思考推理深度</b>: <code>{esc(st.get('effort', 'high'))}</code>\n"
             f"🔊 <b>自动语音答复</b>: {voice_str}\n"
             f"💬 <b>当前绑定会话 ID</b>: {conv_str}\n"
             f"🚪 <b>当前工作状态</b>: {mode_str}\n"
@@ -699,7 +697,7 @@ def register_agy_handlers(
             bot.answer_callback_query(call.id, f"模型已切换为: {m_id}")
             bot.send_message(
                 call.message.chat.id,
-                f"✅ <b>已将 AGY 交互模型切换为：</b> <code>{m_id}</code>",
+                f"✅ <b>已将 AGY 交互模型切换为：</b> <code>{esc(m_id)}</code>",
                 parse_mode="HTML",
             )
         elif call.data.startswith("seteffort:"):
@@ -709,7 +707,7 @@ def register_agy_handlers(
             bot.answer_callback_query(call.id, f"思考深度已切换为: {e_id}")
             bot.send_message(
                 call.message.chat.id,
-                f"✅ <b>已将 AGY 思考推理深度切换为：</b> <code>{e_id}</code>",
+                f"✅ <b>已将 AGY 思考推理深度切换为：</b> <code>{esc(e_id)}</code>",
                 parse_mode="HTML",
             )
         elif call.data == "tts_speak":

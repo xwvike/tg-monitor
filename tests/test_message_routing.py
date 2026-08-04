@@ -1,0 +1,291 @@
+#!/usr/bin/env python3
+"""
+消息路由与会话隔离测试 (tests/test_message_routing.py)
+
+覆盖"一次操作产生两条互不相干的回复"这一类竞态：文件与文字必须合并成
+单次请求，无论两者以什么顺序、间隔多久到达。用 FakeBot 完全离线驱动。
+"""
+
+import atexit
+import os
+import shutil
+import sys
+import tempfile
+import threading
+import time
+import types
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from core import file_pipeline as fp
+from core.handlers import agy_handler as ah
+from tests.harness import main
+
+# ⚠️ 本模块会 monkeypatch agy_handler 的模块级函数，且会调用 sweep_workspaces()。
+# 绝不能被导入进真正在服务的 bot 进程 —— 仅供 --test-sandbox 与手动执行。
+
+# 把工作区指向临时目录：真实的 /tmp/tg_files 里可能有正在处理的任务，
+# 测试里的启动清扫会把它们连同产物一起删掉。
+_TEST_WORKSPACE = tempfile.mkdtemp(prefix="tg_test_ws_")
+ah.WORKSPACE_ROOT = _TEST_WORKSPACE
+atexit.register(shutil.rmtree, _TEST_WORKSPACE, True)
+
+# 压缩各窗口，让整套测试在数秒内跑完（--test-sandbox 会在还原流程中调用）
+ah.MEDIA_GROUP_WINDOW = 0.25
+ah.FILE_CAPTION_WINDOW = 0.6
+ah.TEXT_ABSORB_MAX_AGE = 3.0
+SETTLE = 0.9  # 足够覆盖最长窗口 + 线程调度
+
+
+class FakeBot:
+    """只实现被测路径用到的 telebot 接口。"""
+
+    def __init__(self):
+        self.handlers = {}
+        self.download_delay = 0.0
+
+    def message_handler(self, *a, **k):
+        def deco(fn):
+            self.handlers[fn.__name__] = fn
+            return fn
+        return deco
+
+    def callback_query_handler(self, *a, **k):
+        return lambda fn: fn
+
+    def send_chat_action(self, *a, **k):
+        pass
+
+    def send_message(self, chat_id, text, **k):
+        return types.SimpleNamespace(message_id=999)
+
+    def get_file(self, file_id):
+        return types.SimpleNamespace(file_path="x.jpg", file_size=1000)
+
+    def download_file(self, path):
+        if self.download_delay:
+            time.sleep(self.download_delay)
+        return b"\xff\xd8\xff" + b"0" * 500
+
+
+def photo(mid, caption=None, group=None, forwarded=False):
+    return types.SimpleNamespace(
+        message_id=mid,
+        from_user=types.SimpleNamespace(id=42),
+        chat=types.SimpleNamespace(id=42),
+        media_group_id=group,
+        caption=caption,
+        text=None,
+        content_type="photo",
+        photo=[types.SimpleNamespace(file_id=f"f{mid}", file_size=1000)],
+        forward_origin=(
+            types.SimpleNamespace(type="user",
+                                  sender_user=types.SimpleNamespace(first_name="Eric"))
+            if forwarded else None
+        ),
+    )
+
+
+def text(mid, body):
+    m = photo(mid)
+    m.text = body
+    m.content_type = "text"
+    return m
+
+
+class Rig:
+    """装配一套隔离的 handler，并拦截最终出口只记录"发起了几次请求"。"""
+
+    def __init__(self):
+        self.bot = FakeBot()
+        self.launched = []
+        self.state = {"in_chat": True, "conv_id": "c", "model": "m"}
+        self.dispatch_text, _ = ah.register_agy_handlers(
+            self.bot, 42, lambda uid: self.state, lambda: None, lambda uid: None
+        )
+        self.send_photo = self.bot.handlers["handle_photo"]
+
+        ah.run_file_task = lambda b, m, files, wi, wo, cap, mo: self.launched.append(
+            ("PROCESS", cap, len(files), "")
+        )
+        ah.execute_agy_prompt = lambda b, m, p, g, sv, attached_files=None, cleanup_dirs=None: (
+            self.launched.append(("QA", p, len(attached_files or []), p))
+        )
+        ah.classify_intent = lambda cap, names, model: (
+            any(k in (cap or "") for k in ("拼接", "压缩", "gif")), "stub"
+        )
+
+    def reset(self):
+        for store, lock in ((ah.file_batches, ah.file_batches_lock),
+                            (ah.user_buffers, ah.user_buffers_lock)):
+            with lock:
+                for entry in store.values():
+                    if entry.get("timer"):
+                        entry["timer"].cancel()
+                store.clear()
+        self.launched.clear()
+
+    def first(self, idx=1):
+        return self.launched[0][idx] if self.launched else None
+
+
+def test_file_then_text(s):
+    r = Rig()
+
+    s.section("先发文件、后打字（手动追问）")
+    r.reset()
+    r.send_photo(photo(1))
+    time.sleep(0.15)
+    s.check("文件未独立发起请求", len(r.launched), 0)
+    r.dispatch_text(text(2, "这张图什么意思？"))
+    time.sleep(0.3)
+    s.check("合并成单次请求", len(r.launched), 1)
+    s.check("指令被认领", r.first(1), "这张图什么意思？")
+    s.check("分流到问答", r.first(0), "QA")
+
+    s.section("后打的是处理指令")
+    r.reset()
+    r.send_photo(photo(3))
+    time.sleep(0.15)
+    r.dispatch_text(text(4, "帮我压缩一下"))
+    time.sleep(0.3)
+    s.check("单次请求", len(r.launched), 1)
+    s.check("分流到物理处理", r.first(0), "PROCESS")
+
+    s.section("一直不说话 → 窗口到点用默认问句放行")
+    r.reset()
+    r.send_photo(photo(5))
+    time.sleep(0.15)
+    s.check("窗口内未发出", len(r.launched), 0)
+    time.sleep(SETTLE)
+    s.check("窗口后自动放行", len(r.launched), 1)
+    s.check("走问答", r.first(0), "QA")
+
+
+def test_text_then_file(s):
+    r = Rig()
+
+    s.section("转发+评论：评论先到（TG 的实际顺序）")
+    r.reset()
+    r.dispatch_text(text(20, "上下拼接，第一张在上面"))
+    time.sleep(0.03)
+    r.send_photo(photo(21, group="g2", forwarded=True))
+    r.send_photo(photo(22, group="g2", forwarded=True))
+    time.sleep(SETTLE)
+    s.check("合并成单次请求", len(r.launched), 1)
+    s.check("评论被吸收为指令", r.first(1), "上下拼接，第一张在上面")
+    s.check("两张图都在同一任务", r.first(2), 2)
+
+    s.section("转发+评论：单文件")
+    r.reset()
+    r.dispatch_text(text(23, "何意为？"))
+    time.sleep(0.03)
+    r.send_photo(photo(24, forwarded=True))
+    time.sleep(SETTLE)
+    s.check("合并成单次请求", len(r.launched), 1)
+    s.check("评论被吸收", r.first(1), "何意为？")
+
+    s.section("陈旧闲聊不得被文件误吸收")
+    r.reset()
+    saved = ah.TEXT_ABSORB_MAX_AGE
+    ah.TEXT_ABSORB_MAX_AGE = 0.2
+    try:
+        r.dispatch_text(text(25, "你好啊"))
+        time.sleep(0.4)
+        r.send_photo(photo(26))
+        time.sleep(0.15)
+        s.check("文件未吸收陈旧文本", len(r.launched), 0)
+    finally:
+        ah.TEXT_ABSORB_MAX_AGE = saved
+
+
+def test_text_during_download(s):
+    r = Rig()
+
+    s.section("文字在文件【下载期间】到达")
+    r.reset()
+    r.bot.download_delay = 0.5
+    threading.Thread(target=lambda: r.send_photo(photo(40, forwarded=True))).start()
+    time.sleep(0.15)  # 此刻仍在下载
+    r.dispatch_text(text(41, "解释一下这张图"))
+    time.sleep(SETTLE + 0.5)
+    r.bot.download_delay = 0.0
+    s.check("只发起一次请求", len(r.launched), 1)
+    s.check("下载期间的文字被认领", r.first(1), "解释一下这张图")
+
+
+def test_caption_ownership(s):
+    r = Rig()
+
+    s.section("转发件的原作者 caption 不是用户指令")
+    r.reset()
+    r.dispatch_text(text(30, "上下拼接，第一张在上面"))
+    time.sleep(0.03)
+    r.send_photo(photo(31, caption="via Eric", group="g3", forwarded=True))
+    r.send_photo(photo(32, caption="via Eric", group="g3", forwarded=True))
+    time.sleep(SETTLE)
+    s.check("只发起一次请求", len(r.launched), 1)
+    s.check("指令是用户评论而非原 caption", r.first(1), "上下拼接，第一张在上面")
+    s.check("两张图都在", r.first(2), 2)
+
+    s.section("转发件带 caption 但用户没写评论 → 降级为上下文")
+    r.reset()
+    r.send_photo(photo(33, caption="via Eric", forwarded=True))
+    time.sleep(0.15)
+    s.check("原 caption 未被当成指令立即开工", len(r.launched), 0)
+    time.sleep(SETTLE)
+    s.check("窗口后按默认问句放行", len(r.launched), 1)
+    s.truthy("原 caption 作为上下文保留", "via Eric" in (r.first(3) or ""))
+
+    s.section("非转发件的 caption 仍然是用户指令")
+    r.reset()
+    r.send_photo(photo(34, caption="压缩一下"))
+    time.sleep(0.3)
+    s.check("立即开工", len(r.launched), 1)
+    s.check("指令即 caption", r.first(1), "压缩一下")
+
+
+def test_conversation_isolation(s):
+    s.section("内部会话不得污染 /history 与 conv_id")
+    s.truthy("Planner prompt 带内部标记",
+             fp.INTERNAL_MARKER in fp.build_plan_prompt(["/a.jpg"], "/out", "压缩"))
+    s.check("预览剥掉 XML 包装",
+            ah._clean_preview("<USER_REQUEST>\n何意为？\n</USER_REQUEST>"
+                              "\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>"),
+            "何意为？")
+    s.check("新标记会被识别为内部会话",
+            ah._is_internal_conversation(f"x {fp.INTERNAL_MARKER} y"), True)
+    for sig in ah.LEGACY_INTERNAL_SIGNATURES:
+        s.check(f"历史特征被识别: {sig[:16]}...",
+                ah._is_internal_conversation(f"<USER_REQUEST>{sig}..."), True)
+    s.check("用户真实会话不被误杀", ah._is_internal_conversation("帮我看看这段代码"), False)
+
+    if os.path.isdir(ah.BRAIN_DIR):
+        convs = ah.get_brain_conversations()
+        polluted = [c for c in convs if "Planner" in c[1] or fp.INTERNAL_MARKER in c[1]]
+        s.check("实际会话列表中无 Planner 残留", polluted, [])
+
+
+def test_workspace_sweep(s):
+    s.section("启动清扫遗留工作区")
+    probe_in = os.path.join(ah.WORKSPACE_ROOT, "in", "__sweep_probe__")
+    probe_out = os.path.join(ah.WORKSPACE_ROOT, "out", "__sweep_probe__")
+    os.makedirs(probe_in, exist_ok=True)
+    os.makedirs(probe_out, exist_ok=True)
+    open(os.path.join(probe_in, "leftover.bin"), "w").close()
+    ah.sweep_workspaces()
+    s.check("遗留输入目录已回收", os.path.exists(probe_in), False)
+    s.check("遗留输出目录已回收", os.path.exists(probe_out), False)
+
+
+SUITES = [
+    ("文件先到", test_file_then_text),
+    ("文本先到", test_text_then_file),
+    ("下载期间到达", test_text_during_download),
+    ("caption 归属", test_caption_ownership),
+    ("会话隔离", test_conversation_isolation),
+    ("工作区清扫", test_workspace_sweep),
+]
+
+if __name__ == "__main__":
+    main(SUITES)

@@ -92,12 +92,24 @@ QA_PHRASES = [
 ]
 
 
-def _agy_env():
+def agy_env():
+    """构造调用 agy 及执行工具命令时的环境变量。
+
+    代理地址取自 .env 的 TG_PROXY（由 bot.py 的 load_dotenv 注入），
+    不再硬编码 —— 换台机器或改端口时只需改一处配置。
+    """
     env = os.environ.copy()
-    env["HTTP_PROXY"] = "http://127.0.0.1:10809"
-    env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
+    proxy = os.getenv("TG_PROXY", "").strip().strip("\"'") or os.getenv("HTTP_PROXY", "")
+    if proxy:
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+        # 本机服务（TTS/STT/OCR）必须直连，否则要依赖代理自身的私网路由规则
+        env.setdefault("NO_PROXY", "localhost,127.0.0.1,::1")
     env["PATH"] = f"{os.path.expanduser('~/.local/bin')}:{env.get('PATH', '')}"
     return env
+
+
+_agy_env = agy_env  # 兼容旧调用点
 
 
 def _is_auth_failure(text):

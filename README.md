@@ -81,7 +81,7 @@ graph TD
 - **动态版本构建 (Dynamic Versioning)**: `VERSION` 基于代码文件最后修改时间戳自动计算（如 `v2026.08.02-1012`），彻底消除写死的静态版本号。
 - **精简快照命名 (`snap_YYYYMMDD_HHMM[_tag].tar.gz`)**: 一键生成包含 `core/`、`config/`、`jobs/`、`bin/` 及 `requirements.txt` 的轻量快照包（保存至 `releases/snapshots/`）。
 - **幽灵文件消除机制**: 还原前先校验压缩包完整性 (`tar -tzf`)，通过后自动清空受控子目录 (`core/`, `config/`, `jobs/`, `bin/`)，确保解压后快照之后新增的幽灵文件/坏代码被 100% 抹除。
-- **选择性还原与自救 (`tg-bot restore` / `tg-bot rescue`)**: 一键解压还原，自动跑沙箱三级校验并重启服务。
+- **选择性还原与自救 (`tg-bot restore` / `tg-bot rescue`)**: 一键解压还原，自动跑沙箱四级校验并重启服务。
 - **永久保留快照机制**: 若生成的快照文件名中包含 `keep` 关键字，该快照将被视为“免死金牌”，永久存活，不受 20 个快照上限的滚动清除限制。
 
 ### 5. 🚀 一键部署与解耦迁移 (`install.sh` & `.env`)
@@ -105,7 +105,8 @@ tg-bot rescue           # 🚨 一键自救！服务崩溃时自动诊断并还�
 tg-bot version          # 查看机器人当前运行版本 (基于修改时间的动态版本号)
 tg-bot status           # 查看机器人与动态任务引擎服务状态
 tg-bot state            # 查看 Telegram 用户的当前 Chat 模式与绑定的会话 ID
-tg-bot test             # 运行沙箱 3 级探针校验 (依赖、Telegram API、AGY 引擎)
+tg-bot test             # 沙箱 4 级校验 (语法、单元测试、Telegram API、AGY 引擎)
+./install.sh --check    # 审计当前部署 (工具链/agy/unit 漂移/软链/sudo/服务)
 tg-bot upgrade <file>   # 自动快照 ➔ 校验新代码 ➔ 部署重启 ➔ 失败自动恢复
 tg-bot maintain         # 手动立即触发运行每周自动维保任务
 tg-bot tts "文本"       # 运行两阶段独立 TTS 语音生成与转码测试

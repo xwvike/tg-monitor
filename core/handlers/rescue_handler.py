@@ -7,6 +7,12 @@ Layer 1: 远程自救与快照控制系统 (rescue_handler.py)
 import logging
 import os
 import subprocess
+import sys
+
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+from core.tg_format import code_block, esc, send_html
 
 MANAGE_BIN = os.path.abspath(
     os.path.join(os.path.dirname(__file__), "../../bin/manage.sh")
@@ -29,11 +35,11 @@ def register_rescue_handlers(bot, allowed_user_id: int):
                 [MANAGE_BIN, "rescue"], capture_output=True, text=True, timeout=60
             )
             output = res.stdout.strip() or res.stderr.strip() or "自救诊断处理完毕。"
-            bot.send_message(
-                message.chat.id, f"<b>[🚨 系统自救诊断结果]</b>\n<pre>{output}</pre>"
+            send_html(
+                bot, message.chat.id, f"<b>[🚨 系统自救诊断结果]</b>\n{code_block(output)}"
             )
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 自救命令执行异常: {e}")
+            send_html(bot, message.chat.id, f"❌ 自救命令执行异常: {esc(e)}")
 
     @bot.message_handler(commands=["backup", "snapshot"])
     def handle_backup(message):
@@ -48,11 +54,11 @@ def register_rescue_handlers(bot, allowed_user_id: int):
                 [MANAGE_BIN, "backup", tag], capture_output=True, text=True, timeout=60
             )
             output = res.stdout.strip()
-            bot.send_message(
-                message.chat.id, f"<b>[📸 快照备份结果]</b>\n<pre>{output}</pre>"
+            send_html(
+                bot, message.chat.id, f"<b>[📸 快照备份结果]</b>\n{code_block(output)}"
             )
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 快照备份执行失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 快照备份执行失败: {esc(e)}")
 
     @bot.message_handler(commands=["backups", "snapshots"])
     def handle_backups_list(message):
@@ -65,11 +71,11 @@ def register_rescue_handlers(bot, allowed_user_id: int):
                 [MANAGE_BIN, "backups"], capture_output=True, text=True, timeout=30
             )
             output = res.stdout.strip()
-            bot.send_message(
-                message.chat.id, f"<b>[📜 历史备份快照列表]</b>\n<pre>{output}</pre>"
+            send_html(
+                bot, message.chat.id, f"<b>[📜 历史备份快照列表]</b>\n{code_block(output)}"
             )
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取快照列表失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取快照列表失败: {esc(e)}")
 
     @bot.message_handler(commands=["restore"])
     def handle_restore(message):
@@ -80,7 +86,7 @@ def register_rescue_handlers(bot, allowed_user_id: int):
         target = args[1] if len(args) > 1 else ""
 
         bot.send_message(
-            message.chat.id, f"🔄 正在发起系统还原指令... ({target or '最新稳态'})"
+            message.chat.id, f"🔄 正在发起系统还原指令... ({esc(target) or '最新稳态'})"
         )
 
         try:
@@ -89,8 +95,8 @@ def register_rescue_handlers(bot, allowed_user_id: int):
                 cmd.append(target)
             res = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             output = res.stdout.strip() or res.stderr.strip()
-            bot.send_message(
-                message.chat.id, f"<b>[🔄 恢复还原结果]</b>\n<pre>{output}</pre>"
+            send_html(
+                bot, message.chat.id, f"<b>[🔄 恢复还原结果]</b>\n{code_block(output)}"
             )
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 快照还原失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 快照还原失败: {esc(e)}")

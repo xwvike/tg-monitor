@@ -42,14 +42,47 @@
 ### 2. 幽灵文件消除与一键自救恢复机制
 若系统遇到故障、服务崩溃或代码修改坏掉，可以执行以下命令救援：
 - `tg-bot rescue`: 自动诊断服务健康度，若服务异常，自动提取最新的稳态快照覆盖恢复并重启。
+
+> 🔒 **顺序铁律**：`rescue` 必须**先锁定还原目标、再拍故障现场取证快照**。
+> 反过来做的话，取证快照会成为"最新快照"，自救就退化成把刚坏掉的状态原样装回去
+> —— 这个缺陷曾让整套自救系统长期空转。`latest_restorable_snapshot()` 会排除
+> `*_before_rescue*`，`tests/test_rescue.py` 对该顺序做静态守护。
 - `tg-bot restore [snapshot_name]`: 手动还原指定快照包。执行**压缩包完整性预检 (tar -tzf)** ➔ **净空受控子目录消除幽灵文件** ➔ **干净解压** ➔ **沙箱探针校验** ➔ **重启服务**。
 - `tg-bot backups`: 查看所有可用的历史快照列表。
 
 ### 3. 修改与发布标准流程
-任何对 `core/bot.py` 的代码修改，必须严格执行以下三步：
+任何对 `core/` 的代码修改，必须严格执行以下三步：
 1. **动态版本构建**: `VERSION` 由 `core/bot.py` 根据文件最后修改时间戳自动生成，无需手写硬编码。
-2. **沙箱预检测试**: 执行 `tg-bot test` 确保语法预检、Telegram API 联调与 AGY 探针三级校验全部 PASS！
+2. **沙箱四级校验**: 执行 `tg-bot test`，四级全部 PASS 才允许发布：
+   - `[1/4]` 语法预检（扫描 `core/` 与 `jobs/` 全部 Python 文件）
+   - `[2/4]` **业务逻辑单元测试**（`tests/run_all.py`，语法通过不代表行为正确）
+   - `[3/4]` Telegram API 联调探针
+   - `[4/4]` AGY 引擎底层探针
 3. **安全升级部署**: 执行 `tg-bot upgrade <new_file>`（自动先抓快照 ➔ 校验代码 ➔ 部署重启 ➔ 崩溃自动触发自救回滚）。
+
+> ⚠️ **改了行为就必须补测试**。`tests/` 是唯一能挡住"改坏了但还能跑"的闸门，
+> 且它随快照一起打包——不进 `tests/` 的验证等于没验证。
+
+### 3.0 Telegram 消息格式化铁律
+Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命令输出、异常文本、
+进程名、容器名、RSS 正文）只要含 `<` 或 `&`，整条消息就会被 Telegram 以 400 拒收，
+且拒收往往被 `except` 吞掉只留一行日志 —— 消息**静默消失**。
+
+因此一律使用 `core/tg_format.py`：
+- `esc(value)` — 插值前转义
+- `code_block(text)` — 包 `<pre>` + 转义 + 截断
+- `send_html(bot, chat_id, text)` — 发送；解析失败自动降级为纯文本重发
+
+> ⚠️ 严禁写 `f"<pre>{output}</pre>"` 这类裸插值。
+> `tests/test_tg_format.py` 会静态扫描 `core/` 拦截此类写法。
+
+### 3.1 部署与可迁移性
+- **线上环境必须完全由 `install.sh` 产出**，禁止手工改 systemd unit。
+  手工改动会让新机器上的部署与线上不一致（这个坑已经踩过一次）。
+- `./install.sh` 幂等，可反复执行以就地修复。
+- `./install.sh --check` 审计当前部署：工具链、agy、venv、.env、
+  systemd unit 是否与脚本定义漂移、软链、免密 sudo、服务状态、沙箱四级校验。
+- 新增系统级依赖时，必须同步更新 `install.sh` 的 `TOOLCHAIN` 映射与 `config/TOOLCHAIN.md`。
 
 ### 4. 声明式定时任务配置规范 (`config/tasks.yaml` & `core/task_engine.py`)
 - **纯任务声明表**: `tasks.yaml` 只定义“做什么、什么时候做”，严禁在其中放置任何凭证、Token 或连接信息。通知发送模块直接从 `.env` 环境变量读取。

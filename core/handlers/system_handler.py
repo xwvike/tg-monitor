@@ -5,12 +5,19 @@ Layer 2: 系统与容器状态监测层 (system_handler.py)
 """
 
 import logging
+import os
 import subprocess
+import sys
 
 import docker
 import psutil
 import telebot
 from telebot import types
+
+sys.path.append(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+)
+from core.tg_format import esc, send_html
 
 logger = logging.getLogger("SystemHandler")
 
@@ -58,7 +65,7 @@ def register_system_handlers(bot, allowed_user_id: int):
             )
             bot.send_message(message.chat.id, msg)
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取系统状态失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取系统状态失败: {esc(e)}")
 
     @bot.message_handler(commands=["docker"])
     def handle_docker(message):
@@ -73,7 +80,7 @@ def register_system_handlers(bot, allowed_user_id: int):
             summary = []
             for c in containers:
                 status_icon = "🟢" if c.status == "running" else "🔴"
-                summary.append(f"{status_icon} <b>{c.name}</b> ({c.status})")
+                summary.append(f"{status_icon} <b>{esc(c.name)}</b> ({esc(c.status)})")
                 btn_log = types.InlineKeyboardButton(
                     f"📜 {c.name} 日志", callback_data=f"docker_log:{c.id[:12]}"
                 )
@@ -88,7 +95,7 @@ def register_system_handlers(bot, allowed_user_id: int):
             )
             bot.send_message(message.chat.id, msg, reply_markup=markup)
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取 Docker 容器状态失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取 Docker 容器状态失败: {esc(e)}")
 
     @bot.callback_query_handler(func=lambda call: call.data.startswith("docker_"))
     def handle_docker_callback(call):
@@ -102,17 +109,17 @@ def register_system_handlers(bot, allowed_user_id: int):
                 bot.answer_callback_query(call.id, f"正在获取 {container.name} 日志...")
                 logs = container.logs(tail=30).decode("utf-8", errors="replace")
                 escaped_logs = telebot.formatting.escape_html(logs[-3000:])
-                msg = f"📜 <b>{container.name} 最新 30 条日志</b>:\n<pre>{escaped_logs}</pre>"
+                msg = f"📜 <b>{esc(container.name)} 最新 30 条日志</b>:\n<pre>{escaped_logs}</pre>"
                 bot.send_message(call.message.chat.id, msg)
             elif action == "docker_restart":
                 bot.answer_callback_query(call.id, f"正在重启 {container.name}...")
                 container.restart()
                 bot.send_message(
                     call.message.chat.id,
-                    f"✅ 容器 <b>{container.name}</b> 已成功重启！",
+                    f"✅ 容器 <b>{esc(container.name)}</b> 已成功重启！",
                 )
         except Exception as e:
-            bot.send_message(call.message.chat.id, f"❌ Docker 操作失败: {e}")
+            send_html(bot, call.message.chat.id, f"❌ Docker 操作失败: {esc(e)}")
 
     @bot.message_handler(commands=["top"])
     def handle_top(message):
@@ -138,11 +145,12 @@ def register_system_handlers(bot, allowed_user_id: int):
             lines = ["⚡ <b>进程资源占用 Top 5</b>\n──────────────────────"]
             for p in processes:
                 lines.append(
-                    f"• <b>{p.info['name']}</b> (PID: {p.info['pid']}) - CPU: {p.info['cpu_percent']}% | RAM: {p.info['memory_percent']:.1f}%"
+                    f"• <b>{esc(p.info['name'])}</b> (PID: {p.info['pid']}) "
+                    f"- CPU: {p.info['cpu_percent']}% | RAM: {p.info['memory_percent']:.1f}%"
                 )
             bot.send_message(message.chat.id, "\n".join(lines))
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取进程 Top5 失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取进程 Top5 失败: {esc(e)}")
 
     @bot.message_handler(commands=["net"])
     def handle_net(message):
@@ -155,10 +163,10 @@ def register_system_handlers(bot, allowed_user_id: int):
             for iface, addr_list in addrs.items():
                 ips = [a.address for a in addr_list if a.family.name == "AF_INET"]
                 if ips:
-                    lines.append(f"• <b>{iface}</b>: {', '.join(ips)}")
+                    lines.append(f"• <b>{esc(iface)}</b>: {esc(', '.join(ips))}")
             bot.send_message(message.chat.id, "\n".join(lines))
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取网络状态失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取网络状态失败: {esc(e)}")
 
     @bot.message_handler(commands=["systemctl"])
     def handle_systemctl(message):
@@ -179,10 +187,10 @@ def register_system_handlers(bot, allowed_user_id: int):
                 )
                 status = res.stdout.strip()
                 icon = "🟢" if status == "active" else "🔴"
-                lines.append(f"{icon} <b>{s}</b>: {status}")
+                lines.append(f"{icon} <b>{esc(s)}</b>: {esc(status)}")
             bot.send_message(message.chat.id, "\n".join(lines))
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 获取 Systemctl 状态失败: {e}")
+            send_html(bot, message.chat.id, f"❌ 获取 Systemctl 状态失败: {esc(e)}")
 
     return {
         "status": handle_status,

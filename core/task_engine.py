@@ -25,6 +25,9 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from core.tg_format import code_block, esc, send_html
+
 # 配置路径
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG_PATH = os.path.join(BASE_DIR, "config", "tasks.yaml")
@@ -64,16 +67,14 @@ def send_tg_notification(title: str, body: str):
 
         bot = telebot.TeleBot(bot_token, parse_mode="HTML")
 
-        # 截断过长内容（避免超过 TG 消息长度限制）
-        if len(body) > 3500:
-            body = body[:3500] + "\n\n<i>[内容过长，已被自动截断...]</i>"
-
+        # 任务输出可能是 RSS 正文、XML、报错堆栈 —— 必须转义，
+        # 否则一个 `<` 就让整条通知被 Telegram 拒收并被 except 吞掉
         msg = (
-            f"🔔 <b>[{title}] 任务执行完成简报</b>\n"
+            f"🔔 <b>[{esc(title)}] 任务执行完成简报</b>\n"
             f"──────────────────────\n"
-            f"<code>{body.strip()}</code>"
+            f"{code_block(body)}"
         )
-        bot.send_message(chat_id, msg)
+        send_html(bot, chat_id, msg)
         logger.info(f"Telegram 通知已成功发送: {title}")
     except Exception as e:
         logger.error(f"发送 Telegram 通知失败: {e}")

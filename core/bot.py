@@ -24,6 +24,8 @@ from handlers.agy_handler import register_agy_handlers
 from handlers.rescue_handler import register_rescue_handlers
 from handlers.system_handler import register_system_handlers
 
+from core.tg_format import code_block, esc, send_html
+
 
 def _get_dynamic_version():
     try:
@@ -248,12 +250,13 @@ def global_text_router(message):
                 [manage_bin, "rescue"], capture_output=True, text=True, timeout=60
             )
             output = res.stdout.strip() or res.stderr.strip() or "自救诊断处理完毕。"
-            bot.send_message(
+            send_html(
+                bot,
                 message.chat.id,
-                f"<b>[🚨 系统自救诊断结果]</b>\n<pre>{output}</pre>",
+                f"<b>[🚨 系统自救诊断结果]</b>\n{code_block(output)}",
             )
         except Exception as e:
-            bot.send_message(message.chat.id, f"❌ 执行异常: {e}")
+            send_html(bot, message.chat.id, f"❌ 执行异常: {esc(e)}")
         return
     elif text == "💬 进入 AGY 对话":
         st = get_user_state(uid)
@@ -308,9 +311,9 @@ if __name__ == "__main__":
         import glob
         import py_compile
 
-        print(f"=== 🧪 启动分层微内核沙箱健康度与三联调校验 (v{VERSION}) ===")
+        print(f"=== 🧪 启动分层微内核沙箱健康度与四级校验 (v{VERSION}) ===")
 
-        # [1/3] 真实语法校验：扫描 core/ 与 jobs/ 下全部 Python 文件
+        # [1/4] 真实语法校验：扫描 core/ 与 jobs/ 下全部 Python 文件
         core_dir = os.path.dirname(os.path.abspath(__file__))
         project_dir = os.path.dirname(core_dir)
         py_files = (
@@ -327,34 +330,51 @@ if __name__ == "__main__":
                 scan_failed.append((os.path.relpath(pf, project_dir), str(compile_err)))
 
         if scan_failed:
-            print(f"[1/3] ❌ 语法预检失败 ({len(scan_failed)} 个文件):")
+            print(f"[1/4] ❌ 语法预检失败 ({len(scan_failed)} 个文件):")
             for fname, err_detail in scan_failed:
                 print(f"       {fname}: {err_detail}")
             sys.exit(1)
         else:
             print(
-                f"[1/3] 依赖包与分层 Handler 语法预检: OK ({len(py_files)} 个 Python 文件已扫描)"
+                f"[1/4] 依赖包与分层 Handler 语法预检: OK ({len(py_files)} 个 Python 文件已扫描)"
             )
 
-        # [2/3] Telegram API 联调探针
+        # [2/4] 业务逻辑单元测试：语法通过不代表行为正确，
+        #       这一级才是能挡住"改坏了但还能跑"的那道闸。
         try:
-            me = bot.get_me()
-            print(f"[2/3] Telegram API 联调校验成功: @{me.username} ({me.first_name})")
+            sys.path.insert(0, project_dir)
+            from tests import run_all
+
+            tests_ok, n_passed, n_failed = run_all.run(verbose=False)
+            if not tests_ok:
+                print(f"[2/4] ❌ 单元测试失败: {n_failed} 项未通过（共 {n_passed + n_failed} 项）")
+                sys.exit(1)
+            print(f"[2/4] 业务逻辑单元测试: OK ({n_passed} 项断言全部通过)")
+        except SystemExit:
+            raise
         except Exception as e:
-            print(f"[2/3] ❌ Telegram API 联调失败: {e}")
+            print(f"[2/4] ❌ 单元测试无法执行: {e}")
             sys.exit(1)
 
-        # [3/3] AGY 引擎底层探针
+        # [3/4] Telegram API 联调探针
+        try:
+            me = bot.get_me()
+            print(f"[3/4] Telegram API 联调校验成功: @{me.username} ({me.first_name})")
+        except Exception as e:
+            print(f"[3/4] ❌ Telegram API 联调失败: {e}")
+            sys.exit(1)
+
+        # [4/4] AGY 引擎底层探针
         try:
             out = subprocess.check_output(
                 [AGY_BIN, "--version"], stderr=subprocess.STDOUT
             ).decode("utf-8")
-            print(f"[3/3] AGY 引擎底层探针连通成功: {out.strip()}")
+            print(f"[4/4] AGY 引擎底层探针连通成功: {out.strip()}")
         except Exception as e:
-            print(f"[3/3] ❌ AGY 引擎探针异常: {e}")
+            print(f"[4/4] ❌ AGY 引擎探针异常: {e}")
             sys.exit(1)
 
-        print("✅ 沙箱三级分层校验全部 PASS！准备发布升级！")
+        print("✅ 沙箱四级分层校验全部 PASS！准备发布升级！")
         sys.exit(0)
 
     load_user_states()
