@@ -76,6 +76,14 @@ RECIPE_INDEX = [
         "keywords": ["gif", "动图", "表情包"],
     },
     {
+        "file": "images_to_pdf.md",
+        "exts": {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"},
+        "keywords": [
+            "转pdf", "转成pdf", "做成pdf", "合成pdf", "合并成pdf",
+            "生成pdf", "打包成pdf", "存成pdf", "导出pdf", "转为pdf",
+        ],
+    },
+    {
         "file": "pdf_compression.md",
         "exts": {".pdf"},
         "keywords": [
@@ -105,6 +113,7 @@ PROCESS_PHRASES = [
     "转pdf", "转word", "transcode", "转docx", "转md", "转markdown",
     "太大", "压压", "转图片", "转成图", "转为图", "转png", "转jpg", "转jpeg",
     "按页", "每页", "拆成图", "分页",
+    "转成pdf", "做成pdf", "合成pdf", "合并成pdf", "生成pdf", "打包成pdf",
     "转html", "转epub", "电子书", "分割", "切割", "截取", "降噪",
     "compress", "resize", "crop", "rotate", "merge", "stitch", "watermark",
     "extract audio", "convert to",
@@ -281,12 +290,17 @@ def select_recipes(file_names, caption):
 
     scored = []
     for entry in RECIPE_INDEX:
-        ext_hit = bool(exts & entry["exts"])
-        if not ext_hit:
+        if not (exts & entry["exts"]):
             # 扩展名对不上就别塞 —— 给 PDF 任务提供讲 pngquant 的手册只会干扰规划
             continue
-        kw_hit = any(k in low for k in entry["keywords"])
-        scored.append((2 if kw_hit else 1, entry["file"]))
+        # 按**最长命中关键词**打分：「合并成pdf」应判定为图片转 PDF，
+        # 而不是被更短的「合并成」抢给拼接手册
+        hits = [k for k in entry["keywords"] if k in low]
+        scored.append((max((len(k) for k in hits), default=0), entry["file"]))
+
+    # 只要有关键词命中，就不再提供纯靠扩展名兜底的手册（那些多半是噪声）
+    if any(score > 0 for score, _ in scored):
+        scored = [item for item in scored if item[0] > 0]
 
     scored.sort(key=lambda x: -x[0])
     picked = []

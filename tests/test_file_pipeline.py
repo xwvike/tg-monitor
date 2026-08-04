@@ -172,6 +172,51 @@ def test_pdf_recipe_routing(s):
         s.check(f"{caption!r} 判定方式", how, "keyword")
 
 
+def test_image_to_pdf_routing(s):
+    """图片转 PDF 与图片拼接必须区分开 —— 两者都能"合并多张图"，但产物完全不同。"""
+    imgs = ["photo_01.jpg", "photo_02.jpg"]
+
+    s.section("转 PDF 的措辞命中 images_to_pdf")
+    for caption in ("转成pdf", "做成pdf", "合并成pdf", "打包成pdf", "生成pdf"):
+        picked = [n for n, _ in fp.select_recipes(imgs, caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, "images_to_pdf.md")
+
+    s.section("拼接的措辞仍命中 image_stitching")
+    for caption in ("拼成长图", "上下拼接", "合并成一张", "左右拼接"):
+        picked = [n for n, _ in fp.select_recipes(imgs, caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, "image_stitching.md")
+
+    s.section("最长关键词优先")
+    # 「合并成pdf」同时匹配 image_stitching 的「合并成」与本份的「合并成pdf」，
+    # 必须由更长、更具体的那个胜出
+    picked = [n for n, _ in fp.select_recipes(imgs, "合并成pdf")]
+    s.check("更具体的关键词胜出", picked[0], "images_to_pdf.md")
+
+    s.section("意图判定走关键词短路")
+    for caption in ("转成pdf", "合并成pdf", "做成pdf", "打包成pdf"):
+        _, how = fp.classify_intent(caption, imgs, "m")
+        s.check(f"{caption!r} 判定方式", how, "keyword")
+
+
+def test_recipe_selection_precision(s):
+    """明确意图时不应再塞入靠扩展名兜底的手册 —— 那是 prompt 噪声。"""
+    s.section("有关键词命中时只给命中的手册")
+    for names, caption, expected in (
+        (["a.jpg"], "压缩一下", ["image_compression.md"]),
+        (["a.jpg"], "转成pdf", ["images_to_pdf.md"]),
+        (["r.pdf"], "压缩一下", ["pdf_compression.md"]),
+        (["r.pdf"], "按页转成图片", ["pdf_to_images.md"]),
+        (["v.mp4"], "转gif", ["video_to_gif.md"]),
+    ):
+        s.check(f"{names[0]} {caption!r}",
+                [n for n, _ in fp.select_recipes(names, caption)], expected)
+
+    s.section("无关键词命中时才用扩展名兜底")
+    picked = [n for n, _ in fp.select_recipes(["a.jpg"], "随便弄弄")]
+    s.truthy("给出候选手册", len(picked) > 0)
+    s.check("兜底候选均为图片类", [n for n in picked if not n.startswith("image")], [])
+
+
 def test_product_packaging(s):
     """产物过多时自动打包 —— PDF 按页转图动辄几十张，逐个发送会刷屏。"""
     s.section("阈值行为")
@@ -414,6 +459,8 @@ SUITES = [
     ("意图判定", test_intent_shortcircuit),
     ("菜谱选取", test_recipe_selection),
     ("PDF 菜谱路由", test_pdf_recipe_routing),
+    ("图片转PDF路由", test_image_to_pdf_routing),
+    ("菜谱选取精度", test_recipe_selection_precision),
     ("产物打包", test_product_packaging),
     ("工具链裁剪", test_toolchain_trim),
     ("命令提取", test_command_extraction),
