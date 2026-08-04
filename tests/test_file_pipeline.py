@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -20,6 +21,11 @@ from tests.harness import main
 
 def _has(binary):
     return shutil.which(binary) is not None
+
+
+def _read_recipe(name):
+    with open(os.path.join(fp.RECIPE_DIR, name), encoding="utf-8") as fh:
+        return fh.read()
 
 
 def _make_image(path, size="300x200", gradient="blue-red"):
@@ -215,6 +221,67 @@ def test_recipe_selection_precision(s):
     picked = [n for n, _ in fp.select_recipes(["a.jpg"], "随便弄弄")]
     s.truthy("给出候选手册", len(picked) > 0)
     s.check("兜底候选均为图片类", [n for n in picked if not n.startswith("image")], [])
+
+
+def test_video_trim_routing(s):
+    """视频剪辑与转 GIF 是两类需求，措辞必须各自命中。"""
+    vids = ["clip.mp4"]
+
+    s.section("剪辑措辞命中 video_trim")
+    for caption in ("剪掉10到15秒", "把20-25秒去掉", "只要第30秒到40秒",
+                    "掐头去尾", "两段视频接起来", "剪辑一下"):
+        picked = [n for n, _ in fp.select_recipes(vids, caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, "video_trim.md")
+        _, how = fp.classify_intent(caption, vids, "m")
+        s.check(f"{caption!r} 走关键词短路", how, "keyword")
+
+    s.section("转 GIF 仍命中 video_to_gif")
+    for caption in ("转成gif", "做成表情包", "转动图"):
+        picked = [n for n, _ in fp.select_recipes(vids, caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, "video_to_gif.md")
+
+    s.section("视频问答不得被误判为处理")
+    for caption in ("这个视频讲了什么", "帮我看看这段视频", "里面说了什么"):
+        proc, _ = fp.classify_intent(caption, vids, "m")
+        s.check(f"{caption!r} 判为问答", proc, False)
+
+
+def test_video_trim_recipe_params(s):
+    """守住剪辑菜谱里几条经实测确认的要点。"""
+    body = _read_recipe("video_trim.md")
+    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
+    lines = [ln for ln in commands.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+
+    s.section("必须重编码，不得用流拷贝")
+    # 实测：-c copy 多段剪辑会因关键帧吸附导致画面整体偏移约 1 秒
+    s.check("剪辑命令中无 -c copy", [ln for ln in lines if "-c copy" in ln], [])
+    s.truthy("说明了流拷贝的问题", "关键帧" in body and "偏移" in body)
+
+    s.section("select 必须配套 setpts（否则丢弃段留下卡顿空洞）")
+    # 分别取出 -vf / -af 的内容再判断：`asetpts` 含有 `setpts` 子串，
+    # 整行做包含判断会被自己骗过去
+    for ln in lines:
+        for flag, need in (("-vf", "setpts="), ("-af", "asetpts=")):
+            m = re.search(rf'{flag} "([^"]*)"', ln)
+            if not m:
+                continue
+            body_ = m.group(1)
+            if "select=" not in body_:
+                continue
+            if flag == "-vf":
+                # 去掉 asetpts 干扰后再判断视频侧的 setpts
+                probe = body_.replace("asetpts=", "")
+                s.check(f"{flag} 含 setpts", "setpts=" in probe, True)
+            else:
+                s.check(f"{flag} 含 asetpts", need in body_, True)
+
+    s.section("合并多视频必须统一尺寸")
+    s.truthy("警告 concat 解复用器的陷阱", "-f concat" in body and "坏文件" in body)
+    merge = [ln for ln in lines if "concat=n=" in ln]
+    s.truthy("提供了 concat 滤镜方案", len(merge) > 0)
+    s.check("合并命令带缩放统一",
+            [ln for ln in merge if "scale=" not in ln], [])
 
 
 def test_product_packaging(s):
@@ -489,6 +556,8 @@ SUITES = [
     ("菜谱选取", test_recipe_selection),
     ("PDF 菜谱路由", test_pdf_recipe_routing),
     ("图片转PDF路由", test_image_to_pdf_routing),
+    ("视频剪辑路由", test_video_trim_routing),
+    ("剪辑菜谱要点", test_video_trim_recipe_params),
     ("菜谱选取精度", test_recipe_selection_precision),
     ("产物打包", test_product_packaging),
     ("工具链裁剪", test_toolchain_trim),
