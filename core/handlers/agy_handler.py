@@ -55,8 +55,41 @@ def get_brain_conversations():
     return conversations
 
 
+def check_intent_is_file_processing(caption, file_name):
+    if not caption:
+        return False
+        
+    prompt = (
+        f"系统具备的文件处理能力包括：音视频处理(FFmpeg)、图片处理(ImageMagick/pngquant)、文档转换(Pandoc/Poppler)等。\n"
+        f"用户上传了一个文件 [{file_name}]，附带指令：\"{caption}\"\n\n"
+        f"请判断：用户的核心意图是想利用系统能力对文件进行物理处理/转换/压缩等（回复 True），还是单纯的视觉问答/内容解释/文本提取（回复 False）。\n"
+        f"必须仅回复 True 或 False。"
+    )
+    cmd = [
+        AGY_BIN,
+        "--model", "gemini-3.6-flash-high",
+        "--dangerously-skip-permissions",
+        "-p", prompt
+    ]
+    try:
+        env = os.environ.copy()
+        env["HTTP_PROXY"] = "http://127.0.0.1:10809"
+        env["HTTPS_PROXY"] = "http://127.0.0.1:10809"
+        local_bin = os.path.expanduser("~/.local/bin")
+        env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
+        
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=15, env=env)
+        output = (res.stdout.strip() + res.stderr.strip()).lower()
+        if "true" in output:
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"意图识别失败: {e}")
+        return False
+
+
 def execute_agy_prompt(
-    bot, message, prompt, get_user_state_fn, save_user_states_fn, image_path=None, workspaces=None
+    bot, message, prompt, get_user_state_fn, save_user_states_fn, attached_file=None, workspaces=None
 ):
     """主执行逻辑：含 4秒 typing 守护线程与离线进程管理"""
     chat_id = message.chat.id
@@ -84,8 +117,8 @@ def execute_agy_prompt(
         env["PATH"] = f"{local_bin}:{env.get('PATH', '')}"
 
         final_prompt = prompt
-        if image_path and "[系统文件注入]" not in prompt:
-            final_prompt = f"[{prompt}] 请识别分析这张附件图片文件：{image_path}"
+        if attached_file and "[系统文件注入]" not in prompt:
+            final_prompt = f"[{prompt}] 请读取并结合此附件文件进行分析或回答：{attached_file}"
 
         cmd = [AGY_BIN, "--dangerously-skip-permissions"]
 
@@ -229,9 +262,9 @@ def execute_agy_prompt(
         finally:
             stop_typing.set()
             typing_thread.join(timeout=1)
-            if image_path and os.path.exists(image_path):
+            if attached_file and os.path.exists(attached_file):
                 try:
-                    os.remove(image_path)
+                    os.remove(attached_file)
                 except Exception:
                     pass
 
@@ -610,9 +643,10 @@ def register_agy_handlers(
             
             caption = message.caption
 
-            if caption:
+            if check_intent_is_file_processing(caption, "image.jpg"):
+                bot.send_chat_action(message.chat.id, "upload_document")
                 prompt = (
-                    f"[系统文件注入] 用户上传了图片，并附带了明确指令。\n"
+                    f"[系统文件注入] 用户上传了图片，并附带了明确处理指令。\n"
                     f"▶️ 文件路径: {tmp_path}\n"
                     f"▶️ 文件大小: {size_mb} MB\n"
                     f"▶️ 预期输出目录: {workspace_out}\n"
@@ -620,25 +654,24 @@ def register_agy_handlers(
                     f"🚨 【最高优先级操作规范】:\n"
                     f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
                     f"2. 根据【用户指令】，在终端执行相应的命令（如 convert, pngquant 等）处理该文件。\n"
-                    f"3. 严禁偷懒只做口头分析！只要用户的指令暗示了文件操作（如压缩、拼接、加水印），必须产出真实文件到 {workspace_out} 目录。\n"
-                    f"4. 只有当指令纯粹是问答（如 '这是什么'）时，才允许仅回复文本。"
+                    f"3. 必须产出真实文件到 {workspace_out} 目录。系统会自动回传给用户。\n"
+                )
+                execute_agy_prompt(
+                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
+                    attached_file=tmp_path, workspaces={"in": workspace_in, "out": workspace_out}
                 )
             else:
-                prompt = (
-                    f"[系统文件注入] 用户上传了一张图片 (大小: {size_mb} MB)，存放于 {tmp_path}，预期输出目录 {workspace_out}。\n"
-                    f"用户未提供任何指令说明。\n"
-                    f"请简要描述这是一张什么图片，并主动询问用户是否需要进行工具链处理（如: 压缩体积、转换格式等）。"
+                prompt = caption or "请详细描述这张图片的内容，若包含代码或报错信息请指出并解释。"
+                try:
+                    import shutil
+                    if os.path.exists(workspace_out):
+                        shutil.rmtree(workspace_out)
+                except Exception:
+                    pass
+                execute_agy_prompt(
+                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
+                    attached_file=tmp_path, workspaces=None
                 )
-
-            execute_agy_prompt(
-                bot,
-                message,
-                prompt,
-                get_user_state_fn,
-                save_user_states_fn,
-                image_path=tmp_path,
-                workspaces={"in": workspace_in, "out": workspace_out},
-            )
         except Exception as e:
             bot.send_message(
                 message.chat.id,
@@ -721,30 +754,37 @@ def register_agy_handlers(
             with open(tmp_path, "wb") as new_file:
                 new_file.write(downloaded_file)
 
-            caption = message.caption or "无附加说明"
-            size_mb = round(file_size / (1024 * 1024), 2)
+            caption = message.caption or ""
 
-            prompt = (
-                f"[系统文件注入] 用户上传了文件，并附带了明确指令。\n"
-                f"▶️ 文件路径: {tmp_path}\n"
-                f"▶️ 文件大小: {size_mb} MB\n"
-                f"▶️ 预期输出目录: {workspace_out}\n"
-                f"▶️ 用户指令: {caption}\n\n"
-                f"🚨 【最高优先级操作规范】:\n"
-                f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
-                f"2. 根据【用户指令】，使用终端工具（如 ffmpeg, convert, pandoc 等）对文件进行实际的物理处理。\n"
-                f"3. 严禁偷懒只做口头分析！只要用户的指令暗示了文件操作（如压缩、转码、裁剪），必须产出真实文件到 {workspace_out} 目录。\n"
-                f"4. 只有当指令纯粹是信息提取（如 '读取这个pdf的内容'）时，才允许仅输出文本结果。"
-            )
-
-            execute_agy_prompt(
-                bot,
-                message,
-                prompt,
-                get_user_state_fn,
-                save_user_states_fn,
-                workspaces={"in": workspace_in, "out": workspace_out},
-            )
+            if check_intent_is_file_processing(caption, file_name) or not caption:
+                bot.send_chat_action(message.chat.id, "upload_document")
+                prompt = (
+                    f"[系统文件注入] 用户上传了文件，请求进行处理。\n"
+                    f"▶️ 文件路径: {tmp_path}\n"
+                    f"▶️ 文件大小: {size_mb} MB\n"
+                    f"▶️ 预期输出目录: {workspace_out}\n"
+                    f"▶️ 用户指令: {caption}\n\n"
+                    f"🚨 【最高优先级操作规范】:\n"
+                    f"1. 必须查阅 config/TOOLCHAIN.md 和 config/file_recipes/。\n"
+                    f"2. 根据【用户指令】，使用终端工具（如 ffmpeg, convert, pandoc 等）对文件进行实际的物理处理。\n"
+                    f"3. 必须产出真实文件到 {workspace_out} 目录。系统会自动回传给用户。\n"
+                )
+                execute_agy_prompt(
+                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
+                    attached_file=tmp_path, workspaces={"in": workspace_in, "out": workspace_out}
+                )
+            else:
+                prompt = caption or f"请读取并分析附件文件：{file_name}"
+                try:
+                    import shutil
+                    if os.path.exists(workspace_out):
+                        shutil.rmtree(workspace_out)
+                except Exception:
+                    pass
+                execute_agy_prompt(
+                    bot, message, prompt, get_user_state_fn, save_user_states_fn,
+                    attached_file=tmp_path, workspaces=None
+                )
         except Exception as e:
             bot.send_message(
                 message.chat.id,
