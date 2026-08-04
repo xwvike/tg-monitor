@@ -120,6 +120,53 @@ def test_recipes_reference_real_tools(s):
         s.check(f"{fname} 命令全部可解析", True, True)
 
 
+def test_gif_recipe_stays_optimized(s):
+    """守住 GIF 菜谱的减重参数，防止回退成"默认 720px + 默认 dither"。
+
+    实测：720px/12fps/默认 dither 对 5 秒素材产出 9.0 MB，
+    改为 480px/12fps/128 色/bayer 后为 2.5 MB（-72%）。
+    """
+    body = _read(os.path.join(fp.RECIPE_DIR, "video_to_gif.md"))
+
+    s.section("关键减重手段必须在位")
+    s.truthy("使用 bayer 有序抖动", "dither=bayer" in body)
+    s.truthy("限制调色板色数", "max_colors=" in body)
+    s.truthy("给出按时长分档的宽度表", "输入时长" in body and "宽度" in body)
+    s.truthy("说明宽度是平方级杠杆", "宽度²" in body)
+
+    s.section("不得回退到高体积默认值")
+    # 只扫可执行的 bash 代码块 —— 正文里"经实测排除"章节会提到这些反面参数
+    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
+    scales = re.findall(r"scale=(\d+):", commands)
+    s.truthy("示例命令确实指定了宽度", len(scales) > 0)
+    oversized = sorted({w for w in scales if int(w) > 480})
+    s.check("示例命令中无 >480px 的默认宽度", oversized, [])
+    s.check("示例命令未使用实测更差的 stats_mode=diff",
+            "stats_mode=diff" in commands, False)
+    # 注释也在 bash 块内，因此必须逐个实参校验，不能只看关键字是否出现
+    exec_lines = [
+        ln for ln in commands.splitlines()
+        if ln.strip() and not ln.strip().startswith("#")
+    ]
+    uses = [ln for ln in exec_lines if "paletteuse" in ln]
+    gens = [ln for ln in exec_lines if "palettegen" in ln]
+    s.truthy("存在 paletteuse 命令", len(uses) > 0)
+    s.check("每条 paletteuse 都启用 bayer 抖动",
+            [ln for ln in uses if "dither=bayer" not in ln], [])
+    s.truthy("存在 palettegen 命令", len(gens) > 0)
+    s.check("每条 palettegen 都限制了色数",
+            [ln for ln in gens if "max_colors=" not in ln], [])
+
+    s.section("palettegen 与 paletteuse 的 fps/scale 必须成对一致")
+    # 逐个 bash 代码块内配对校验：两步用的滤镜参数不一致会导致画质明显劣化
+    for block in re.findall(r"```bash\n(.*?)```", body, re.DOTALL):
+        gen_params = re.findall(r"fps=(\d+),scale=(\d+):", block)
+        if len(gen_params) < 2:
+            continue
+        pairs = set(gen_params)
+        s.check("同一代码块内 fps/scale 一致", len(pairs), 1)
+
+
 def test_toolchain_trim_keeps_file_tools(s):
     """load_toolchain() 的裁剪不得误伤文件处理相关段落。"""
     trimmed = fp.load_toolchain()
@@ -184,6 +231,7 @@ SUITES = [
     ("入口函数一致性", test_python_entrypoints_exist),
     ("二进制覆盖", test_declared_binaries_are_installable),
     ("菜谱命令可解析", test_recipes_reference_real_tools),
+    ("GIF 菜谱减重参数", test_gif_recipe_stays_optimized),
     ("工具链裁剪", test_toolchain_trim_keeps_file_tools),
 ]
 
