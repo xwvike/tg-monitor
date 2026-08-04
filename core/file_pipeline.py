@@ -31,6 +31,10 @@ TOOLCHAIN_FILE = os.path.join(PROJECT_DIR, "config", "TOOLCHAIN.md")
 INTERNAL_MARKER = "[[TG-MONITOR-INTERNAL]]"
 
 MAX_PLAN_ATTEMPTS = 2  # 首次规划 + 1 次带错误回喂的重规划
+# 产物体积上限。超过则把**实际体积**回喂给 Planner 让它降参重做。
+# GIF 的体积与内容强相关（同参数下实测相差可达 21 倍），靠菜谱预设宽度必然
+# 要么过大要么过度降质；量出来再调才是可靠的做法。
+MAX_PRODUCT_BYTES = 10 * 1024 * 1024
 CMD_TIMEOUT = 180  # 单条 bash 命令超时（秒）
 PLAN_TIMEOUT = 150  # 单次规划调用超时（秒）
 ROUTER_TIMEOUT = 20  # 意图兜底判定超时（秒）
@@ -507,6 +511,16 @@ def collect_outputs(workspace_in, workspace_out, original_inputs):
     )
 
 
+def _oversized_products(paths):
+    """返回超出体积上限的产物描述；未超限则为空串。"""
+    over = [
+        f"{os.path.basename(p)} = {_human_size(os.path.getsize(p))}"
+        for p in paths
+        if os.path.getsize(p) > MAX_PRODUCT_BYTES
+    ]
+    return "、".join(over)
+
+
 def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on_status=None):
     """规划 → 执行 → 失败回喂重规划。返回 (ok, products, error_message)。"""
 
@@ -522,12 +536,17 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
         if os.path.isfile(os.path.join(workspace_in, f))
     }
     failure = None
+    retry_reason = None
 
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         if attempt == 1:
             status("⚙️ 正在规划处理步骤...")
         else:
-            status(f"🔧 上一轮执行报错，正在重新规划 (第 {attempt} 次)...")
+            # 区分重规划的原因：产物偏大不是"报错"，说成报错会误导用户
+            if retry_reason == "oversize":
+                status(f"📦 上一轮产物偏大，正在按实际体积重新规划 (第 {attempt} 次)...")
+            else:
+                status(f"🔧 上一轮执行报错，正在重新规划 (第 {attempt} 次)...")
 
         prompt = build_plan_prompt(file_paths, workspace_out, caption, failure)
         ok, output, err_kind = call_agy(prompt, model, PLAN_TIMEOUT)
@@ -552,16 +571,39 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
 
         status(f"🚀 正在执行 {len(commands)} 步处理...")
         exec_ok, failure = execute_commands(commands, workspace_in)
+        if not exec_ok:
+            retry_reason = "error"
 
         if exec_ok:
             products = collect_outputs(workspace_in, workspace_out, original_inputs)
             if products:
+                oversized = _oversized_products(products)
+                if oversized and attempt < MAX_PLAN_ATTEMPTS:
+                    # 不是失败，只是太大 —— 把实际体积告诉 Planner，让它降参重做
+                    logger.info(f"产物超出 {_human_size(MAX_PRODUCT_BYTES)}，回喂重规划: {oversized}")
+                    retry_reason = "oversize"
+                    for path in products:
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
+                    failure = {
+                        "cmd": commands[-1],
+                        "stderr": (
+                            f"命令执行成功，但产物体积过大：{oversized}。\n"
+                            f"上限为 {_human_size(MAX_PRODUCT_BYTES)}。请显著降低输出尺寸后重做"
+                            f"（体积通常与宽度的平方成正比，把宽度减半即可降到约四分之一；"
+                            f"优先降宽度而非帧率）。"
+                        ),
+                    }
+                    continue
                 return True, products, None
             # 命令全绿但没产物，同样值得回喂重来
             failure = {
                 "cmd": commands[-1],
                 "stderr": "所有命令返回码为 0，但输出目录中没有任何文件。请检查输出路径是否写对。",
             }
+            retry_reason = "error"
 
         if attempt >= MAX_PLAN_ATTEMPTS:
             break

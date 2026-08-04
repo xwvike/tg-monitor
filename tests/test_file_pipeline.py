@@ -197,6 +197,71 @@ def test_execution_layer(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_oversized_product_feedback(s):
+    """产物过大时把**实际体积**回喂给 Planner 重做，而不是直接投递。
+
+    GIF 体积与内容强相关（同参数实测相差 21 倍），预设宽度必然要么过大
+    要么过度降质；量出来再调才可靠。
+    """
+    if not (_has("convert") or _has("magick")):
+        s.section("体积回喂（跳过：未安装 ImageMagick）")
+        return
+
+    tool = "magick" if _has("magick") else "convert"
+    work = tempfile.mkdtemp()
+    original_call = fp.call_agy
+    original_limit = fp.MAX_PRODUCT_BYTES
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        _make_image(f"{win}/src.png", size="900x900")
+
+        s.section("超限 → 回喂实际体积并重做")
+        # 900x900 渐变 PNG 约 10 KB；把上限压到 5 KB 使首轮必然超限
+        fp.MAX_PRODUCT_BYTES = 5_000
+        prompts = []
+
+        def stub(prompt, model, timeout):
+            prompts.append(prompt)
+            width = 900 if len(prompts) == 1 else 60
+            return True, (f'<json>["{tool} {win}/src.png -resize {width}x '
+                          f'{wout}/out.png"]</json>'), None
+
+        fp.call_agy = stub
+        steps = []
+        ok, products, _ = fp.plan_and_execute(
+            [f"{win}/src.png"], win, wout, "缩放", "m", steps.append)
+
+        s.check("触发了第二轮规划", len(prompts), 2)
+        s.truthy("重规划 prompt 含实际体积", "体积过大" in prompts[1])
+        s.truthy("重规划 prompt 提示降宽度", "宽度" in prompts[1])
+        s.truthy("状态播报提示产物偏大", any("偏大" in x for x in steps))
+        # 产物偏大不是"报错"，播报措辞不得混淆两者
+        s.check("未把体积超限误报为执行报错",
+                [x for x in steps if "执行报错" in x], [])
+        s.check("最终成功", ok, True)
+        s.check("产出 1 个文件", len(products), 1)
+        s.truthy("最终产物在限额内",
+                 os.path.getsize(products[0]) <= fp.MAX_PRODUCT_BYTES)
+
+        s.section("未超限 → 直接投递，不额外规划")
+        fp.MAX_PRODUCT_BYTES = original_limit
+        prompts.clear()
+        for f in os.listdir(wout):
+            os.remove(os.path.join(wout, f))
+        fp.call_agy = lambda p, m, t: (
+            True, f'<json>["{tool} {win}/src.png -resize 50x {wout}/small.png"]</json>', None)
+        ok, products, _ = fp.plan_and_execute(
+            [f"{win}/src.png"], win, wout, "缩放", "m")
+        s.check("只规划一次", len(prompts), 0)
+        s.check("成功", ok, True)
+    finally:
+        fp.call_agy = original_call
+        fp.MAX_PRODUCT_BYTES = original_limit
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_plan_prompt(s):
     s.section("Planner prompt 组装")
     prompt = fp.build_plan_prompt(["/abs/in/src.jpg"], "/abs/out", "压缩一下")
@@ -276,6 +341,7 @@ SUITES = [
     ("工具链裁剪", test_toolchain_trim),
     ("命令提取", test_command_extraction),
     ("执行层", test_execution_layer),
+    ("产物体积回喂", test_oversized_product_feedback),
     ("Prompt 组装", test_plan_prompt),
     ("编排循环", test_orchestration),
 ]

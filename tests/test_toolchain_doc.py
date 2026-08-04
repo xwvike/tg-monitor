@@ -121,26 +121,31 @@ def test_recipes_reference_real_tools(s):
 
 
 def test_gif_recipe_stays_optimized(s):
-    """守住 GIF 菜谱的减重参数，防止回退成"默认 720px + 默认 dither"。
+    """守住 GIF 菜谱的减重手段与"不靠猜"的立场。
 
-    实测：720px/12fps/默认 dither 对 5 秒素材产出 9.0 MB，
-    改为 480px/12fps/128 色/bayer 后为 2.5 MB（-72%）。
+    实测同参数下不同内容体积相差 21 倍（320 KB ~ 6.5 MB），因此**不能**按
+    时长套固定宽度表：对静态素材是无谓降质，对复杂素材仍会超标。
+    正确做法是给合理默认值 + 由流水线量出实际体积后回喂重做。
     """
     body = _read(os.path.join(fp.RECIPE_DIR, "video_to_gif.md"))
 
     s.section("关键减重手段必须在位")
     s.truthy("使用 bayer 有序抖动", "dither=bayer" in body)
     s.truthy("限制调色板色数", "max_colors=" in body)
-    s.truthy("给出按时长分档的宽度表", "输入时长" in body and "宽度" in body)
     s.truthy("说明宽度是平方级杠杆", "宽度²" in body)
 
-    s.section("不得回退到高体积默认值")
+    s.section("不得退回按时长猜宽度的做法")
+    s.truthy("说明体积由内容决定", "内容" in body and "21 倍" in body)
+    s.truthy("给出与内容无关的杠杆倍率表", "相对效力" in body)
+    s.truthy("说明超限会由流水线回喂实际体积", "回喂" in body or "实际体积" in body)
+    s.check("不再按时长套固定宽度表", "输入时长" in body, False)
+
+    s.section("示例命令的参数")
     # 只扫可执行的 bash 代码块 —— 正文里"经实测排除"章节会提到这些反面参数
     commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
     scales = re.findall(r"scale=(\d+):", commands)
     s.truthy("示例命令确实指定了宽度", len(scales) > 0)
-    oversized = sorted({w for w in scales if int(w) > 480})
-    s.check("示例命令中无 >480px 的默认宽度", oversized, [])
+    s.check("宽度不超过输入常见上限 720", sorted({w for w in scales if int(w) > 720}), [])
     s.check("示例命令未使用实测更差的 stats_mode=diff",
             "stats_mode=diff" in commands, False)
     # 注释也在 bash 块内，因此必须逐个实参校验，不能只看关键字是否出现
