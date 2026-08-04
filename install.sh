@@ -39,6 +39,7 @@ declare -A TOOLCHAIN=(
     [pdfinfo]=poppler-utils
     [pdfimages]=poppler-utils
     [pdftoppm]=poppler-utils
+    [gs]=ghostscript
 )
 
 CHECK_ONLY=false

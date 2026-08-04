@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import zipfile
 
 logger = logging.getLogger("FilePipeline")
 
@@ -35,6 +36,10 @@ MAX_PLAN_ATTEMPTS = 2  # 首次规划 + 1 次带错误回喂的重规划
 # GIF 的体积与内容强相关（同参数下实测相差可达 21 倍），靠菜谱预设宽度必然
 # 要么过大要么过度降质；量出来再调才是可靠的做法。
 MAX_PRODUCT_BYTES = 10 * 1024 * 1024
+# 产物数量上限。超过则打包成单个 zip 再投递 —— "PDF 按页转图片"这类任务
+# 动辄产出几十个文件，逐个发送会刷屏并触碰 Telegram 频率限制。
+# 打包放在 Python 侧（标准库 zipfile），不依赖系统 zip，也不指望 Planner 记得。
+MAX_INLINE_PRODUCTS = 8
 CMD_TIMEOUT = 180  # 单条 bash 命令超时（秒）
 PLAN_TIMEOUT = 150  # 单次规划调用超时（秒）
 ROUTER_TIMEOUT = 20  # 意图兜底判定超时（秒）
@@ -70,6 +75,23 @@ RECIPE_INDEX = [
         "exts": {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv"},
         "keywords": ["gif", "动图", "表情包"],
     },
+    {
+        "file": "pdf_compression.md",
+        "exts": {".pdf"},
+        "keywords": [
+            "压缩", "压一下", "减小", "小一点", "缩小", "瘦身", "太大",
+            "compress", "reduce size", "邮件附件",
+        ],
+    },
+    {
+        "file": "pdf_to_images.md",
+        "exts": {".pdf"},
+        "keywords": [
+            "转图片", "转成图", "转为图", "按页", "拆成图", "每页一张",
+            "转png", "转jpg", "转jpeg", "导出图片", "截图",
+            "每页", "导出", "分页", "一页一张",
+        ],
+    },
 ]
 
 # 明确指向"物理处理"的措辞
@@ -81,6 +103,8 @@ PROCESS_PHRASES = [
     "去除元数据", "去exif", "去掉exif", "提取音频", "抽取音频", "分离音轨",
     "静音", "变速", "加速", "减速", "帧率", "码率", "导出", "另存",
     "转pdf", "转word", "transcode", "转docx", "转md", "转markdown",
+    "太大", "压压", "转图片", "转成图", "转为图", "转png", "转jpg", "转jpeg",
+    "按页", "每页", "拆成图", "分页",
     "转html", "转epub", "电子书", "分割", "切割", "截取", "降噪",
     "compress", "resize", "crop", "rotate", "merge", "stitch", "watermark",
     "extract audio", "convert to",
@@ -257,17 +281,12 @@ def select_recipes(file_names, caption):
 
     scored = []
     for entry in RECIPE_INDEX:
-        kw_hit = any(k in low for k in entry["keywords"])
         ext_hit = bool(exts & entry["exts"])
-        if kw_hit and ext_hit:
-            score = 3
-        elif kw_hit:
-            score = 2
-        elif ext_hit:
-            score = 1
-        else:
+        if not ext_hit:
+            # 扩展名对不上就别塞 —— 给 PDF 任务提供讲 pngquant 的手册只会干扰规划
             continue
-        scored.append((score, entry["file"]))
+        kw_hit = any(k in low for k in entry["keywords"])
+        scored.append((2 if kw_hit else 1, entry["file"]))
 
     scored.sort(key=lambda x: -x[0])
     picked = []
@@ -509,6 +528,32 @@ def collect_outputs(workspace_in, workspace_out, original_inputs):
         for f in os.listdir(workspace_out)
         if os.path.isfile(os.path.join(workspace_out, f))
     )
+
+
+def package_products(products, workspace_out, archive_stem="output"):
+    """产物过多时打包成单个 zip；未超阈值则原样返回。
+
+    返回 (最终投递列表, 是否已打包)。
+    """
+    if len(products) <= MAX_INLINE_PRODUCTS:
+        return products, False
+
+    archive = os.path.join(workspace_out, f"{safe_filename(archive_stem, 'output')}.zip")
+    try:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(products):
+                zf.write(path, os.path.basename(path))
+    except Exception as e:
+        logger.error(f"打包产物失败，改为逐个投递: {e}")
+        return products, False
+
+    for path in products:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    logger.info(f"产物 {len(products)} 个超过 {MAX_INLINE_PRODUCTS}，已打包为 {os.path.basename(archive)}")
+    return [archive], True
 
 
 def _oversized_products(paths):

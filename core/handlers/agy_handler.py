@@ -28,6 +28,7 @@ from core.file_pipeline import (
     VIDEO_EXTS,
     agy_env,
     classify_intent,
+    package_products,
     plan_and_execute,
     safe_filename,
 )
@@ -178,7 +179,15 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out, caption
         )
 
         if ok:
-            on_status(f"✅ 处理完成，正在回传 {len(products)} 个文件...")
+            count = len(products)
+            products, packed = package_products(
+                products, workspace_out, os.path.splitext(
+                    os.path.basename(file_paths[0]))[0] if file_paths else "output"
+            )
+            if packed:
+                on_status(f"📦 共 {count} 个产物，已打包为压缩包回传...")
+            else:
+                on_status(f"✅ 处理完成，正在回传 {count} 个文件...")
             for path in products:
                 try:
                     _send_product(bot, chat_id, message.message_id, path)

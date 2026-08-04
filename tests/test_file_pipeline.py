@@ -136,6 +136,81 @@ def test_recipe_selection(s):
         s.check(f"{fname} 无 $OUTPUT/$INPUT 变量", "$OUTPUT" in body or "$INPUT" in body, False)
 
 
+def test_pdf_recipe_routing(s):
+    """PDF 的两类需求必须各自命中正确的菜谱，且不夹带无关手册。"""
+    s.section("压缩 vs 按页转图 的排序")
+    cases = [
+        ("压缩一下", "pdf_compression.md"),
+        ("太大了帮我压压", "pdf_compression.md"),
+        ("邮件附件太大", "pdf_compression.md"),
+        ("按页转成图片", "pdf_to_images.md"),
+        ("每页导出一张jpg", "pdf_to_images.md"),
+        ("拆成图片", "pdf_to_images.md"),
+        ("转png", "pdf_to_images.md"),
+    ]
+    for caption, expected in cases:
+        picked = [n for n, _ in fp.select_recipes(["report.pdf"], caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, expected)
+        # 两份 PDF 手册都提供是合理的（意图接近时让 Planner 自行取舍），
+        # 但绝不能混入图片/视频类手册
+        s.check(f"{caption!r} 无跨类型噪声",
+                [n for n in picked if not n.startswith("pdf_")], [])
+
+    s.section("扩展名不匹配的菜谱一律不入选")
+    for names, forbidden in (
+        (["report.pdf"], "image_compression.md"),
+        (["photo.jpg"], "pdf_compression.md"),
+        (["clip.mp4"], "pdf_to_images.md"),
+    ):
+        picked = [n for n, _ in fp.select_recipes(names, "压缩一下")]
+        s.check(f"{names[0]} 不含 {forbidden}", forbidden in picked, False)
+
+    s.section("PDF 相关措辞走关键词短路，不烧模型调用")
+    for caption in ("压缩一下", "太大了帮我压压", "按页转成图片",
+                    "每页导出一张jpg", "转png", "拆成图片"):
+        _, how = fp.classify_intent(caption, ["report.pdf"], "m")
+        s.check(f"{caption!r} 判定方式", how, "keyword")
+
+
+def test_product_packaging(s):
+    """产物过多时自动打包 —— PDF 按页转图动辄几十张，逐个发送会刷屏。"""
+    s.section("阈值行为")
+    work = tempfile.mkdtemp()
+    try:
+        def make(n):
+            for f in os.listdir(work):
+                os.remove(os.path.join(work, f))
+            paths = []
+            for i in range(n):
+                path = os.path.join(work, f"page-{i:02d}.jpg")
+                with open(path, "w") as fh:
+                    fh.write("x" * 200)
+                paths.append(path)
+            return paths
+
+        out, packed = fp.package_products(make(fp.MAX_INLINE_PRODUCTS), work, "doc.pdf")
+        s.check(f"{fp.MAX_INLINE_PRODUCTS} 个（等于阈值）不打包", packed, False)
+        s.check("原样返回全部产物", len(out), fp.MAX_INLINE_PRODUCTS)
+
+        out, packed = fp.package_products(make(fp.MAX_INLINE_PRODUCTS + 1), work, "doc.pdf")
+        s.check("超过阈值则打包", packed, True)
+        s.check("只投递 1 个压缩包", len(out), 1)
+        s.truthy("产物是 zip", out[0].endswith(".zip"))
+
+        import zipfile
+        with zipfile.ZipFile(out[0]) as zf:
+            s.check("压缩包内含全部页面", len(zf.namelist()), fp.MAX_INLINE_PRODUCTS + 1)
+        s.check("散件已清理",
+                [f for f in os.listdir(work) if f.endswith(".jpg")], [])
+
+        s.section("压缩包命名沿用输入名且经过安全收敛")
+        out, _ = fp.package_products(make(20), work, "report;rm -rf .pdf")
+        s.check("包名无 shell 元字符",
+                sorted(set(os.path.basename(out[0])) & set(";|&$`() ")), [])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_toolchain_trim(s):
     s.section("工具链裁剪")
     tc = fp.load_toolchain()
@@ -338,6 +413,8 @@ SUITES = [
     ("文件名注入防护", test_filename_injection),
     ("意图判定", test_intent_shortcircuit),
     ("菜谱选取", test_recipe_selection),
+    ("PDF 菜谱路由", test_pdf_recipe_routing),
+    ("产物打包", test_product_packaging),
     ("工具链裁剪", test_toolchain_trim),
     ("命令提取", test_command_extraction),
     ("执行层", test_execution_layer),

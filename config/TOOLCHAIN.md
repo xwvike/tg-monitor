@@ -103,10 +103,22 @@
 - **类型**: 系统二进制
 - **路径**: `/usr/bin/pandoc`
 - **能力**:
-  - 文档格式万能互转 (Markdown ↔ HTML ↔ Word ↔ PDF ↔ EPUB ↔ LaTeX)
+  - 文档格式互转 (Markdown ↔ HTML ↔ Word/docx ↔ EPUB ↔ LaTeX ↔ RST)
   - 电子书格式转换
   - 幻灯片生成
+- **⚠️ 不能直接输出 PDF**: 本机未安装 LaTeX 引擎，`pandoc x.md -o x.pdf` 会失败。
+  如需 PDF，先 `pandoc` 转 HTML/docx，或改用其他路径。
 - **调用示例**: `pandoc INPUT.md -o OUTPUT.docx`
+
+### Ghostscript
+- **类型**: 系统二进制
+- **路径**: `/usr/bin/gs`
+- **能力**:
+  - PDF 压缩与重新采样（`-dPDFSETTINGS` 预设）
+  - PDF 合并、拆分、页面提取
+  - PostScript ↔ PDF 互转
+  - **保留文字层**：压缩后仍可搜索、可复制（先转图片再合成则会丢失）
+- **调用示例**: `gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dPDFSETTINGS=/ebook -sOutputFile=OUT.pdf IN.pdf`
 
 ### poppler-utils (PDF 工具集)
 - **类型**: 系统二进制
