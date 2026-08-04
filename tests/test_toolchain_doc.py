@@ -120,56 +120,74 @@ def test_recipes_reference_real_tools(s):
         s.check(f"{fname} 命令全部可解析", True, True)
 
 
-def test_gif_recipe_stays_optimized(s):
-    """守住 GIF 菜谱的减重手段与"不靠猜"的立场。
+def _bash_blocks(body):
+    return "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
 
-    实测同参数下不同内容体积相差 21 倍（320 KB ~ 6.5 MB），因此**不能**按
-    时长套固定宽度表：对静态素材是无谓降质，对复杂素材仍会超标。
-    正确做法是给合理默认值 + 由流水线量出实际体积后回喂重做。
-    """
-    body = _read(os.path.join(fp.RECIPE_DIR, "video_to_gif.md"))
 
-    s.section("关键减重手段必须在位")
-    s.truthy("使用 bayer 有序抖动", "dither=bayer" in body)
-    s.truthy("限制调色板色数", "max_colors=" in body)
-    s.truthy("说明宽度是平方级杠杆", "宽度²" in body)
-
-    s.section("不得退回按时长猜宽度的做法")
-    s.truthy("说明体积由内容决定", "内容" in body and "21 倍" in body)
-    s.truthy("给出与内容无关的杠杆倍率表", "相对效力" in body)
-    s.truthy("说明超限会由流水线回喂实际体积", "回喂" in body or "实际体积" in body)
-    s.check("不再按时长套固定宽度表", "输入时长" in body, False)
-
-    s.section("示例命令的参数")
-    # 只扫可执行的 bash 代码块 —— 正文里"经实测排除"章节会提到这些反面参数
-    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
-    scales = re.findall(r"scale=(\d+):", commands)
-    s.truthy("示例命令确实指定了宽度", len(scales) > 0)
-    s.check("宽度不超过输入常见上限 720", sorted({w for w in scales if int(w) > 720}), [])
-    s.check("示例命令未使用实测更差的 stats_mode=diff",
-            "stats_mode=diff" in commands, False)
-    # 注释也在 bash 块内，因此必须逐个实参校验，不能只看关键字是否出现
-    exec_lines = [
+def _exec_lines(commands):
+    """剔除注释行 —— 注释也在 bash 块内，只看关键字会误判。"""
+    return [
         ln for ln in commands.splitlines()
         if ln.strip() and not ln.strip().startswith("#")
     ]
-    uses = [ln for ln in exec_lines if "paletteuse" in ln]
-    gens = [ln for ln in exec_lines if "palettegen" in ln]
+
+
+def test_gif_recipe_params(s):
+    """守住 GIF 菜谱里真正影响产物的参数。
+
+    只校验**可执行命令**，不校验行文措辞 —— 断言散文会把文档锁死在某一版
+    写法上，反而阻碍它变简洁。
+    """
+    body = _read(os.path.join(fp.RECIPE_DIR, "video_to_gif.md"))
+    commands = _bash_blocks(body)
+    lines = _exec_lines(commands)
+
+    s.section("关键减重参数必须出现在每条命令上")
+    uses = [ln for ln in lines if "paletteuse" in ln]
+    gens = [ln for ln in lines if "palettegen" in ln]
     s.truthy("存在 paletteuse 命令", len(uses) > 0)
-    s.check("每条 paletteuse 都启用 bayer 抖动",
-            [ln for ln in uses if "dither=bayer" not in ln], [])
     s.truthy("存在 palettegen 命令", len(gens) > 0)
-    s.check("每条 palettegen 都限制了色数",
+    s.check("每条 paletteuse 启用 bayer 抖动",
+            [ln for ln in uses if "dither=bayer" not in ln], [])
+    s.check("每条 palettegen 限制了色数",
             [ln for ln in gens if "max_colors=" not in ln], [])
+    s.check("未使用实测更差的 stats_mode=diff", "stats_mode=diff" in commands, False)
+
+    s.section("宽度策略")
+    scales = re.findall(r"scale=(\d+):", commands)
+    s.truthy("命令中指定了宽度", len(scales) > 0)
+    s.check("默认宽度不超过 720", sorted({w for w in scales if int(w) > 720}), [])
+    # 体积与内容强相关（实测差 21 倍），按时长硬套宽度对静态素材是无谓降质
+    s.check("未按时长预设宽度表", "输入时长" in body, False)
 
     s.section("palettegen 与 paletteuse 的 fps/scale 必须成对一致")
-    # 逐个 bash 代码块内配对校验：两步用的滤镜参数不一致会导致画质明显劣化
     for block in re.findall(r"```bash\n(.*?)```", body, re.DOTALL):
-        gen_params = re.findall(r"fps=(\d+),scale=(\d+):", block)
-        if len(gen_params) < 2:
+        params = re.findall(r"fps=(\d+),scale=(\d+):", block)
+        if len(params) >= 2:
+            s.check("同一代码块内 fps/scale 一致", len(set(params)), 1)
+
+
+def test_recipes_stay_concise(s):
+    """菜谱会被整段内联进 Planner 的 prompt，篇幅本身就是成本。
+
+    论证性内容（实测数据表、参数取舍的推理）属于提交记录与 ARCHITECTURE.md，
+    不属于操作手册 —— 它既烧 token 又稀释指令。
+    """
+    s.section("篇幅上限")
+    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
+        if not fname.endswith(".md") or fname == "README.md":
             continue
-        pairs = set(gen_params)
-        s.check("同一代码块内 fps/scale 一致", len(pairs), 1)
+        body = _read(os.path.join(fp.RECIPE_DIR, fname))
+        n = len(body.splitlines())
+        s.check(f"{fname} 不超过 60 行（实际 {n}）", n <= 60, True)
+
+    s.section("体例一致")
+    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
+        if not fname.endswith(".md") or fname == "README.md":
+            continue
+        body = _read(os.path.join(fp.RECIPE_DIR, fname))
+        for section in ("## 触发条件", "## 输出规范"):
+            s.check(f"{fname} 含 {section}", section in body, True)
 
 
 def test_toolchain_trim_keeps_file_tools(s):
@@ -236,7 +254,8 @@ SUITES = [
     ("入口函数一致性", test_python_entrypoints_exist),
     ("二进制覆盖", test_declared_binaries_are_installable),
     ("菜谱命令可解析", test_recipes_reference_real_tools),
-    ("GIF 菜谱减重参数", test_gif_recipe_stays_optimized),
+    ("GIF 菜谱参数", test_gif_recipe_params),
+    ("菜谱篇幅与体例", test_recipes_stay_concise),
     ("工具链裁剪", test_toolchain_trim_keeps_file_tools),
 ]
 

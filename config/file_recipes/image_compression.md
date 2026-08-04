@@ -23,5 +23,5 @@ convert <输入绝对路径> -strip -quality 70 <输出目录>/<原名>_compress
 ```
 
 ## 输出规范
-- 产出文件必须保存在 `workspace_out` 目录中。
+- 产出文件必须保存在任务指定的输出目录中。
 - 文件名建议格式: `[原文件名]_compressed.[原后缀]`
