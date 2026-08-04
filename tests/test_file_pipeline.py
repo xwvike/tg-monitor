@@ -284,6 +284,80 @@ def test_video_trim_recipe_params(s):
             [ln for ln in merge if "scale=" not in ln], [])
 
 
+def test_video_compression_routing(s):
+    """三类视频需求（压缩 / 剪辑 / 转 GIF）必须各归各位。"""
+    vids = ["clip.mp4"]
+
+    s.section("各自命中")
+    for caption, expected in (
+        ("压缩一下", "video_compression.md"),
+        ("太大了发不出去", "video_compression.md"),
+        ("小一点", "video_compression.md"),
+        ("邮件附件太大", "video_compression.md"),
+        ("剪掉10到15秒", "video_trim.md"),
+        ("掐头去尾", "video_trim.md"),
+        ("转成gif", "video_to_gif.md"),
+        ("做成表情包", "video_to_gif.md"),
+    ):
+        picked = [n for n, _ in fp.select_recipes(vids, caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None, expected)
+
+    s.section("不得污染其它文件类型")
+    s.check("图片的压缩", [n for n, _ in fp.select_recipes(["a.jpg"], "压缩一下")],
+            ["image_compression.md"])
+    s.check("PDF 的压缩", [n for n, _ in fp.select_recipes(["r.pdf"], "压缩一下")],
+            ["pdf_compression.md"])
+
+
+def test_video_compression_recipe_params(s):
+    """守住压缩菜谱里几条经实测确认、且与直觉相反的结论。"""
+    body = _read_recipe("video_compression.md")
+    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
+    lines = [ln for ln in commands.splitlines()
+             if ln.strip() and not ln.strip().startswith("#")]
+
+    s.section("必须先看码率（低码率再压会变大）")
+    s.truthy("提示依据码率决策", "码率" in body)
+    s.truthy("说明可能越压越大", "变大" in body or "增加" in body)
+
+    s.section("命令要点")
+    s.check("每条命令都指定 CRF", [ln for ln in lines if "-crf" not in ln], [])
+    s.check("每条命令都固定 pix_fmt（保证兼容播放）",
+            [ln for ln in lines if "-pix_fmt yuv420p" not in ln], [])
+    s.check("每条命令都带 faststart",
+            [ln for ln in lines if "+faststart" not in ln], [])
+    s.check("缩放使用 -2 保证偶数尺寸",
+            [ln for ln in lines if "scale=" in ln and "-2" not in ln], [])
+
+    s.section("preset 不是体积杠杆（实测 slow 反而更大）")
+    s.truthy("记录了这一反直觉结论", "preset" in body and "不是体积杠杆" in body)
+    s.check("命令一律用 veryfast",
+            [ln for ln in lines if "-preset" in ln and "veryfast" not in ln], [])
+
+
+def test_probe_reports_bitrate(s):
+    """码率是判断"是否已压过"的依据，探针必须提供。"""
+    if not shutil.which("ffmpeg"):
+        s.section("码率探针（跳过：未安装 ffmpeg）")
+        return
+    work = tempfile.mkdtemp()
+    try:
+        clip = os.path.join(work, "c.mp4")
+        subprocess.run(
+            ["ffmpeg", "-v", "error", "-f", "lavfi",
+             "-i", "testsrc2=size=320x240:rate=15:duration=2",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", "-y", clip],
+            capture_output=True, timeout=120,
+        )
+        s.section("视频元数据")
+        meta = fp.probe_file(clip)
+        s.truthy("含时长", "时长" in meta)
+        s.truthy("含分辨率", "320x240" in meta)
+        s.truthy("含码率", "码率" in meta and "kbps" in meta)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_product_packaging(s):
     """产物过多时自动打包 —— PDF 按页转图动辄几十张，逐个发送会刷屏。"""
     s.section("阈值行为")
@@ -557,6 +631,9 @@ SUITES = [
     ("PDF 菜谱路由", test_pdf_recipe_routing),
     ("图片转PDF路由", test_image_to_pdf_routing),
     ("视频剪辑路由", test_video_trim_routing),
+    ("视频压缩路由", test_video_compression_routing),
+    ("压缩菜谱要点", test_video_compression_recipe_params),
+    ("码率探针", test_probe_reports_bitrate),
     ("剪辑菜谱要点", test_video_trim_recipe_params),
     ("菜谱选取精度", test_recipe_selection_precision),
     ("产物打包", test_product_packaging),

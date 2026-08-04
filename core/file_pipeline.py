@@ -79,6 +79,14 @@ RECIPE_INDEX = [
         "keywords": ["gif", "动图", "表情包"],
     },
     {
+        "file": "video_compression.md",
+        "exts": {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv", ".m4v"},
+        "keywords": [
+            "压缩", "压一下", "压压", "小一点", "减小", "缩小", "瘦身",
+            "太大", "发不出去", "邮件附件", "compress", "reduce size",
+        ],
+    },
+    {
         "file": "video_trim.md",
         "exts": {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv", ".m4v"},
         "keywords": [
@@ -391,6 +399,16 @@ def probe_file(path):
                 )
                 if vstream and vstream.get("width"):
                     parts.append(f"{vstream['width']}x{vstream['height']} {vstream.get('codec_name', '')}".strip())
+                # 码率是判断"是否已经压过"的关键依据：对低码率视频再压
+                # 很容易越压越大（实测 CRF23 重压 CRF28 的片子会大 36%）
+                bitrate = vstream.get("bit_rate") if vstream else None
+                if not bitrate:
+                    bitrate = data.get("format", {}).get("bit_rate")
+                if bitrate:
+                    try:
+                        parts.append(f"码率 {int(bitrate) // 1000}kbps")
+                    except (TypeError, ValueError):
+                        pass
                 astream = next(
                     (s for s in data.get("streams", []) if s.get("codec_type") == "audio"),
                     None,
