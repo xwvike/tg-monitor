@@ -29,7 +29,8 @@
 gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dPDFSETTINGS=/ebook -dCompatibilityLevel=1.4 -sOutputFile=<输出目录>/<原名>_compressed.pdf <输入绝对路径>
 ```
 
-产物超过 10 MB 时流水线会带着实际体积要求重做，此时换用 `/screen`。
+产物仍明显偏大时流水线会要求重做，此时换用 `/screen`。
+但若原文件本就很大、压缩后已按比例缩小，说明参数已合理，不必继续降质。
 
 ### 纯文字 PDF
 文字型 PDF 本身就很小，`gs` 几乎压不动。若压缩后体积没有明显下降，

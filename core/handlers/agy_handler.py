@@ -25,6 +25,7 @@ sys.path.append(
 from core.file_pipeline import (
     AUDIO_EXTS,
     INTERNAL_MARKER,
+    TG_UPLOAD_LIMIT_BYTES,
     VIDEO_EXTS,
     agy_env,
     classify_intent,
@@ -33,7 +34,7 @@ from core.file_pipeline import (
     safe_filename,
 )
 from core.stt import transcribe_voice_file
-from core.tg_format import esc
+from core.tg_format import esc, send_html
 from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_speak
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
@@ -189,11 +190,24 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out, caption
             else:
                 on_status(f"✅ 处理完成，正在回传 {count} 个文件...")
             for path in products:
+                size = os.path.getsize(path)
+                if size > TG_UPLOAD_LIMIT_BYTES:
+                    # 超出 Bot API 上限，直接发会得到一句难懂的原始错误
+                    bot.send_message(
+                        chat_id,
+                        f"⚠️ 产物 <code>{esc(os.path.basename(path))}</code> 为 "
+                        f"{size / 1048576:.1f} MB，超过 Telegram 机器人 "
+                        f"{TG_UPLOAD_LIMIT_BYTES // 1048576} MB 的上传上限，无法回传。\n"
+                        f"可以让我按更小的尺寸重做，或拆成几批分别处理。",
+                        parse_mode="HTML",
+                    )
+                    continue
                 try:
                     _send_product(bot, chat_id, message.message_id, path)
                 except Exception as e:
                     logger.error(f"回传产物 {path} 失败: {e}")
-                    bot.send_message(chat_id, f"⚠️ 产物 {os.path.basename(path)} 回传失败: {e}")
+                    send_html(bot, chat_id,
+                              f"⚠️ 产物 {esc(os.path.basename(path))} 回传失败: {esc(e)}")
             if status_msg is not None:
                 try:
                     bot.delete_message(chat_id, status_msg.message_id)

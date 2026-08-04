@@ -317,12 +317,43 @@ def test_execution_layer(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_oversized_product_feedback(s):
-    """产物过大时把**实际体积**回喂给 Planner 重做，而不是直接投递。
+def test_disproportionate_detection(s):
+    """判据是"产物相对输入失衡"，不是绝对大小。
 
-    GIF 体积与内容强相关（同参数实测相差 21 倍），预设宽度必然要么过大
-    要么过度降质；量出来再调才可靠。
+    只用绝对阈值会误伤合理的大任务 —— 100 张图合成 PDF 无论如何都超阈值，
+    要求降参只会白白毁画质且仍然超标。
     """
+    work = tempfile.mkdtemp()
+    try:
+        def product(mb):
+            path = os.path.join(work, "o.bin")
+            with open(path, "wb") as fh:
+                fh.write(b"0" * int(mb * 1024 * 1024))
+            return [path]
+
+        floor_mb = fp.OVERSIZE_FLOOR_BYTES / 1048576
+        s.section("参数失当 → 判定失衡")
+        for label, inp, out in (("2MB 输入 → 9MB 产物", 2, 9),
+                                ("1MB 输入 → 15MB 产物", 1, 15)):
+            s.truthy(label, bool(fp._disproportionate_products(
+                product(out), int(inp * 1048576))))
+
+        s.section("任务本身就大 → 不得判定失衡")
+        for label, inp, out in (("30MB 图包 → 25MB PDF", 30, 25),
+                                ("50MB 图包 → 45MB PDF", 50, 45),
+                                ("20MB 视频 → 8MB GIF", 20, 8)):
+            s.check(label, fp._disproportionate_products(
+                product(out), int(inp * 1048576)), "")
+
+        s.section("低于关注线一律不折腾")
+        s.check(f"产物 {floor_mb / 2:.1f}MB（远小于输入的 1/10）",
+                fp._disproportionate_products(product(floor_mb / 2), 1024), "")
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_oversized_product_feedback(s):
+    """失衡时把实际体积回喂给 Planner 重做；体量相称时直接投递。"""
     if not (_has("convert") or _has("magick")):
         s.section("体积回喂（跳过：未安装 ImageMagick）")
         return
@@ -330,21 +361,20 @@ def test_oversized_product_feedback(s):
     tool = "magick" if _has("magick") else "convert"
     work = tempfile.mkdtemp()
     original_call = fp.call_agy
-    original_limit = fp.MAX_PRODUCT_BYTES
+    original_floor = fp.OVERSIZE_FLOOR_BYTES
     try:
         win, wout = os.path.join(work, "in"), os.path.join(work, "out")
         os.makedirs(win)
         os.makedirs(wout)
-        _make_image(f"{win}/src.png", size="900x900")
+        _make_image(f"{win}/src.png", size="200x200")
+        fp.OVERSIZE_FLOOR_BYTES = 5_000
 
-        s.section("超限 → 回喂实际体积并重做")
-        # 900x900 渐变 PNG 约 10 KB；把上限压到 5 KB 使首轮必然超限
-        fp.MAX_PRODUCT_BYTES = 5_000
+        s.section("产物远大于输入 → 回喂并重做")
         prompts = []
 
         def stub(prompt, model, timeout):
             prompts.append(prompt)
-            width = 900 if len(prompts) == 1 else 60
+            width = 2400 if len(prompts) == 1 else 60
             return True, (f'<json>["{tool} {win}/src.png -resize {width}x '
                           f'{wout}/out.png"]</json>'), None
 
@@ -354,31 +384,30 @@ def test_oversized_product_feedback(s):
             [f"{win}/src.png"], win, wout, "缩放", "m", steps.append)
 
         s.check("触发了第二轮规划", len(prompts), 2)
-        s.truthy("重规划 prompt 含实际体积", "体积过大" in prompts[1])
-        s.truthy("重规划 prompt 提示降宽度", "宽度" in prompts[1])
+        s.truthy("重规划 prompt 含实际体积对比", "而输入仅" in prompts[1])
+        s.truthy("提示可能是任务本身就大", "任务本身决定" in prompts[1])
         s.truthy("状态播报提示产物偏大", any("偏大" in x for x in steps))
-        # 产物偏大不是"报错"，播报措辞不得混淆两者
-        s.check("未把体积超限误报为执行报错",
+        s.check("未把体积失衡误报为执行报错",
                 [x for x in steps if "执行报错" in x], [])
         s.check("最终成功", ok, True)
         s.check("产出 1 个文件", len(products), 1)
-        s.truthy("最终产物在限额内",
-                 os.path.getsize(products[0]) <= fp.MAX_PRODUCT_BYTES)
 
-        s.section("未超限 → 直接投递，不额外规划")
-        fp.MAX_PRODUCT_BYTES = original_limit
+        s.section("产物与输入体量相称 → 直接投递，不额外规划")
         prompts.clear()
         for f in os.listdir(wout):
             os.remove(os.path.join(wout, f))
+        # 关注线设为 0 使绝对条件必然满足，只剩比例条件把关
+        fp.OVERSIZE_FLOOR_BYTES = 0
         fp.call_agy = lambda p, m, t: (
-            True, f'<json>["{tool} {win}/src.png -resize 50x {wout}/small.png"]</json>', None)
+            True, f'<json>["{tool} {win}/src.png {wout}/same.png"]</json>', None)
         ok, products, _ = fp.plan_and_execute(
-            [f"{win}/src.png"], win, wout, "缩放", "m")
+            [f"{win}/src.png"], win, wout, "转换", "m")
         s.check("只规划一次", len(prompts), 0)
         s.check("成功", ok, True)
+        s.check("产出 1 个文件", len(products), 1)
     finally:
         fp.call_agy = original_call
-        fp.MAX_PRODUCT_BYTES = original_limit
+        fp.OVERSIZE_FLOOR_BYTES = original_floor
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -465,6 +494,7 @@ SUITES = [
     ("工具链裁剪", test_toolchain_trim),
     ("命令提取", test_command_extraction),
     ("执行层", test_execution_layer),
+    ("失衡判据", test_disproportionate_detection),
     ("产物体积回喂", test_oversized_product_feedback),
     ("Prompt 组装", test_plan_prompt),
     ("编排循环", test_orchestration),

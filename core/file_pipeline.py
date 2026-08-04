@@ -32,10 +32,13 @@ TOOLCHAIN_FILE = os.path.join(PROJECT_DIR, "config", "TOOLCHAIN.md")
 INTERNAL_MARKER = "[[TG-MONITOR-INTERNAL]]"
 
 MAX_PLAN_ATTEMPTS = 2  # 首次规划 + 1 次带错误回喂的重规划
-# 产物体积上限。超过则把**实际体积**回喂给 Planner 让它降参重做。
-# GIF 的体积与内容强相关（同参数下实测相差可达 21 倍），靠菜谱预设宽度必然
-# 要么过大要么过度降质；量出来再调才是可靠的做法。
-MAX_PRODUCT_BYTES = 10 * 1024 * 1024
+# 产物体积的"关注线"：低于它一律不折腾（几 MB 的产物没人在意比例）。
+# 它**不是**硬上限 —— 超过它还要与输入体量比较，才判断是否属于参数失当。
+OVERSIZE_FLOOR_BYTES = 5 * 1024 * 1024
+# 产物相对输入的膨胀倍数。超过才认为是**参数选错**而非任务本身就大。
+OVERSIZE_RATIO = 1.5
+# Telegram Bot API 的单文件上传上限
+TG_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # 产物数量上限。超过则打包成单个 zip 再投递 —— "PDF 按页转图片"这类任务
 # 动辄产出几十个文件，逐个发送会刷屏并触碰 Telegram 频率限制。
 # 打包放在 Python 侧（标准库 zipfile），不依赖系统 zip，也不指望 Planner 记得。
@@ -570,14 +573,25 @@ def package_products(products, workspace_out, archive_stem="output"):
     return [archive], True
 
 
-def _oversized_products(paths):
-    """返回超出体积上限的产物描述；未超限则为空串。"""
-    over = [
-        f"{os.path.basename(p)} = {_human_size(os.path.getsize(p))}"
-        for p in paths
-        if os.path.getsize(p) > MAX_PRODUCT_BYTES
-    ]
-    return "、".join(over)
+def _disproportionate_products(products, input_bytes):
+    """判断产物是否**不成比例地大**（即参数选错），而非任务本身就大。
+
+    只用绝对阈值会误伤合理的大任务：100 张图合成 PDF 无论如何都超 10 MB，
+    此时要求降参只会白白毁画质、且仍然超标。真正该拦的是"输出远大于输入"
+    这种参数失当 —— 比如 2 MB 视频转出 9 MB 的 GIF。
+
+    返回描述串；判定为正常则返回空串。
+    """
+    total = sum(os.path.getsize(p) for p in products)
+    if total <= OVERSIZE_FLOOR_BYTES:
+        return ""
+    if input_bytes and total <= input_bytes * OVERSIZE_RATIO:
+        # 与输入体量相称 —— 任务本身就大，不是参数问题
+        return ""
+    return (
+        f"产物合计 {_human_size(total)}，而输入仅 {_human_size(input_bytes)}"
+        if input_bytes else f"产物合计 {_human_size(total)}"
+    )
 
 
 def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on_status=None):
@@ -594,6 +608,9 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
         f for f in os.listdir(workspace_in)
         if os.path.isfile(os.path.join(workspace_in, f))
     }
+    input_bytes = sum(
+        os.path.getsize(p) for p in file_paths if os.path.exists(p)
+    )
     failure = None
     retry_reason = None
 
@@ -636,10 +653,10 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
         if exec_ok:
             products = collect_outputs(workspace_in, workspace_out, original_inputs)
             if products:
-                oversized = _oversized_products(products)
+                oversized = _disproportionate_products(products, input_bytes)
                 if oversized and attempt < MAX_PLAN_ATTEMPTS:
-                    # 不是失败，只是太大 —— 把实际体积告诉 Planner，让它降参重做
-                    logger.info(f"产物超出 {_human_size(MAX_PRODUCT_BYTES)}，回喂重规划: {oversized}")
+                    # 不是失败，只是明显失衡 —— 把实际体积告诉 Planner 让它降参重做
+                    logger.info(f"产物与输入失衡，回喂重规划: {oversized}")
                     retry_reason = "oversize"
                     for path in products:
                         try:
@@ -649,10 +666,11 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
                     failure = {
                         "cmd": commands[-1],
                         "stderr": (
-                            f"命令执行成功，但产物体积过大：{oversized}。\n"
-                            f"上限为 {_human_size(MAX_PRODUCT_BYTES)}。请显著降低输出尺寸后重做"
-                            f"（体积通常与宽度的平方成正比，把宽度减半即可降到约四分之一；"
-                            f"优先降宽度而非帧率）。"
+                            f"命令执行成功，但{oversized}，说明输出参数偏大。\n"
+                            f"请降低输出尺寸后重做（体积通常与宽度的平方成正比，"
+                            f"宽度减半即可降到约四分之一；优先降宽度而非帧率/画质）。\n"
+                            f"注意：若该体积是任务本身决定的（如页数很多、时长很长），"
+                            f"不要为了压体积而过度降质 —— 保持合理参数原样输出即可。"
                         ),
                     }
                     continue
