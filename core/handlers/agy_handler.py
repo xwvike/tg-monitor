@@ -1091,6 +1091,10 @@ def register_agy_handlers(
     def handle_voice(message):
         if message.from_user.id != allowed_user_id:
             return
+        # 与图片/文档/视频保持一致：仅在对话模式下响应
+        st = get_user_state_fn(message.from_user.id)
+        if not st.get("in_chat", False):
+            return
 
         bot.send_chat_action(message.chat.id, "upload_voice")
 

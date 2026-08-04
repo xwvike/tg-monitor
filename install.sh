@@ -32,10 +32,13 @@ declare -A TOOLCHAIN=(
     [ffprobe]=ffmpeg
     [convert]=imagemagick
     [identify]=imagemagick
+    [magick]=imagemagick
     [pngquant]=pngquant
     [pandoc]=pandoc
     [pdftotext]=poppler-utils
     [pdfinfo]=poppler-utils
+    [pdfimages]=poppler-utils
+    [pdftoppm]=poppler-utils
 )
 
 CHECK_ONLY=false

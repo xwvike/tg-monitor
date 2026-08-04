@@ -5,7 +5,6 @@ Layer 0: 核心通信微内核入口 (core/bot.py)
 按优先级依次挂载 Layer 1 (自救与快照) -> Layer 2 (系统监测) -> Layer 3 (AGY AI 交互)。
 """
 
-import json
 import logging
 import os
 import subprocess
@@ -25,6 +24,7 @@ from handlers.rescue_handler import register_rescue_handlers
 from handlers.system_handler import register_system_handlers
 
 from core.tg_format import code_block, esc, send_html
+from core.user_state import UserStateStore
 
 
 def _get_dynamic_version():
@@ -54,56 +54,28 @@ if PROXY_URL:
     apihelper.proxy = {"http": PROXY_URL, "https": PROXY_URL}
 
 bot = telebot.TeleBot(TOKEN, parse_mode="HTML")
-user_states = {}
+
+# 状态持久化：原子写 + 线程锁，实现见 core/user_state.py
+state_store = UserStateStore(STATE_FILE)
 
 
 def load_user_states():
-    global user_states
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE, "r", encoding="utf-8") as f:
-                user_states = json.load(f)
-        except Exception:
-            user_states = {}
+    state_store.load()
 
 
 def save_user_states():
-    try:
-        os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump(user_states, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"保存用户状态失败: {e}")
+    state_store.save()
 
 
 def get_user_state(user_id):
-    uid_str = str(user_id)
-    if uid_str not in user_states:
-        user_states[uid_str] = {
-            "in_chat": False,
-            "conv_id": None,
-            "model": "gemini-3.6-flash-high",
-            "effort": "high",
-        }
-        save_user_states()
-    else:
-        changed = False
-        if "model" not in user_states[uid_str]:
-            user_states[uid_str]["model"] = "gemini-3.6-flash-high"
-            changed = True
-        if "effort" not in user_states[uid_str]:
-            user_states[uid_str]["effort"] = "high"
-            changed = True
-        if changed:
-            save_user_states()
-    return user_states[uid_str]
+    return state_store.get(user_id)
 
 
 def get_main_keyboard(user_id):
     """主面板 Reply 键盘视图"""
     markup = types.ReplyKeyboardMarkup(row_width=3, resize_keyboard=True)
     uid_str = str(user_id)
-    in_chat = user_states.get(uid_str, {}).get("in_chat", False)
+    in_chat = state_store.all.get(uid_str, {}).get("in_chat", False)
 
     if in_chat:
         btn_exit = types.KeyboardButton("🚪 退出对话")

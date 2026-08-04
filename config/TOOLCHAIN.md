@@ -26,7 +26,7 @@
 ### TTS 语音合成引擎
 - **类型**: Python 模块
 - **路径**: `core/tts.py`
-- **入口函数**: `generate_telegram_voice(text, max_len=1000)`
+- **入口函数**: `generate_telegram_voice(text, voice=...)`
 - **能力**:
   - 中英文文本转语音
   - 两阶段流水线: Edge-TTS API → FFmpeg OGG/Opus 转码
@@ -36,12 +36,12 @@
 ### STT 语音识别引擎
 - **类型**: Python 模块
 - **路径**: `core/stt.py`
-- **入口函数**: `transcribe_voice(ogg_path)`
+- **入口函数**: `transcribe_voice_file(file_path, model=..., language='zh')`
 - **能力**:
   - 语音/音频文件转文字
   - 多语言自动识别
   - 自动 FFmpeg 兜底重采样 (处理非标准采样率)
-- **依赖**: Speaches 容器 (`localhost:8000`, Faster-Whisper)、FFmpeg
+- **依赖**: Speaches 容器 (`127.0.0.1:8000`, Faster-Whisper)、FFmpeg
 
 ---
 
@@ -51,7 +51,7 @@
 - **类型**: Docker 容器
 - **容器名**: `wechat-ocr-api`
 - **镜像**: `golangboyme/wxocr`
-- **端点**: `http://localhost:5000/ocr`
+- **端点**: `http://127.0.0.1:5000/ocr`
 - **能力**:
   - 图片文字提取 (中英文高精度)
   - 返回文字内容与坐标位置信息
@@ -133,4 +133,15 @@
 
 ---
 
-> **⚠️ 工具链扩展规范**: 新安装的任何工具或容器，必须同步更新本清单，确保 AGY 始终拥有最新的能力认知。
+> **⚠️ 工具链扩展规范**
+>
+> 本文件由 `load_toolchain()` **直接内联进 Planner 的 prompt** —— 它不是给人看的
+> 说明书，而是模型规划命令时依据的"能力地图"。写错一个函数名或声明一个没安装的
+> 工具，就会直接误导规划。
+>
+> 因此新增任何工具或容器时，必须同步：
+> 1. 更新本清单
+> 2. 在 `install.sh` 的 `TOOLCHAIN` 映射中登记（否则新机器上不会被安装）
+>
+> `tests/test_toolchain_doc.py` 会校验：本文声明的 Python 入口函数在对应模块中
+> 真实存在，且声明的每个二进制都被 `install.sh` 覆盖并在本机可执行。

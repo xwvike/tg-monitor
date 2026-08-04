@@ -17,12 +17,16 @@ from tests import (
     test_message_routing,
     test_rescue,
     test_tg_format,
+    test_toolchain_doc,
+    test_user_state,
 )
 from tests.harness import run_suites
 
 ALL_SUITES = (
     test_rescue.SUITES
+    + test_user_state.SUITES
     + test_tg_format.SUITES
+    + test_toolchain_doc.SUITES
     + test_file_pipeline.SUITES
     + test_message_routing.SUITES
 )

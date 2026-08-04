@@ -86,6 +86,27 @@ def photo(mid, caption=None, group=None, forwarded=False):
     )
 
 
+def voice(mid):
+    m = photo(mid)
+    m.content_type = "voice"
+    m.voice = types.SimpleNamespace(file_id=f"v{mid}", file_size=1000)
+    return m
+
+
+def document(mid, name="a.pdf"):
+    m = photo(mid)
+    m.content_type = "document"
+    m.document = types.SimpleNamespace(file_id=f"d{mid}", file_size=1000, file_name=name)
+    return m
+
+
+def sticker(mid):
+    m = photo(mid)
+    m.content_type = "sticker"
+    m.sticker = types.SimpleNamespace(emoji="🙂")
+    return m
+
+
 def text(mid, body):
     m = photo(mid)
     m.text = body
@@ -245,6 +266,54 @@ def test_caption_ownership(s):
     s.check("指令即 caption", r.first(1), "压缩一下")
 
 
+def test_handlers_respect_chat_mode(s):
+    """所有内容类 handler 必须一致地只在对话模式下响应。
+
+    语音曾是唯一漏掉 in_chat 守卫的入口 —— 面板模式下发语音仍会唤起 AGY，
+    而图片/文档/贴纸都会安静忽略。
+    """
+    r = Rig()
+    original_stt = ah.transcribe_voice_file
+    try:
+        r.reset()
+        r.state["in_chat"] = False
+
+        s.section("非对话模式：一律不响应")
+        stt_calls = []
+        ah.transcribe_voice_file = lambda p: (stt_calls.append(p), (True, "x"))[1]
+
+        r.bot.handlers["handle_voice"](voice(50))
+        s.check("voice 未触发 STT", stt_calls, [])
+
+        r.bot.handlers["handle_photo"](photo(51))
+        time.sleep(0.15)
+        s.check("photo 未建立文件批次", len(ah.file_batches), 0)
+
+        r.bot.handlers["handle_any_file"](document(52))
+        time.sleep(0.15)
+        s.check("document 未建立文件批次", len(ah.file_batches), 0)
+
+        r.bot.handlers["handle_sticker"](sticker(53))
+        s.check("sticker 未发起请求", len(r.launched), 0)
+
+        s.check("文本分发也返回未处理", r.dispatch_text(text(54, "hi")), False)
+
+        s.section("对话模式：正常响应")
+        r.reset()
+        r.state["in_chat"] = True
+        stt_calls.clear()
+        r.bot.handlers["handle_voice"](voice(55))
+        s.check("voice 触发 STT", len(stt_calls), 1)
+
+        r.bot.handlers["handle_photo"](photo(56))
+        time.sleep(0.15)
+        s.check("photo 建立了文件批次", len(ah.file_batches), 1)
+    finally:
+        ah.transcribe_voice_file = original_stt
+        r.state["in_chat"] = True
+        r.reset()
+
+
 def test_conversation_isolation(s):
     s.section("内部会话不得污染 /history 与 conv_id")
     s.truthy("Planner prompt 带内部标记",
@@ -283,6 +352,7 @@ SUITES = [
     ("文本先到", test_text_then_file),
     ("下载期间到达", test_text_during_download),
     ("caption 归属", test_caption_ownership),
+    ("对话模式守卫", test_handlers_respect_chat_mode),
     ("会话隔离", test_conversation_isolation),
     ("工作区清扫", test_workspace_sweep),
 ]

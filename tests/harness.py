@@ -12,7 +12,7 @@ import traceback
 
 def silence_app_logging():
     """静音被测模块的 INFO 日志，避免淹没 --test-sandbox 的判定输出。"""
-    for name in ("AGYHandler", "FilePipeline", "TTSEngine", "STTEngine", "TGFormat", "TaskEngine"):
+    for name in ("AGYHandler", "FilePipeline", "TTSEngine", "STTEngine", "TGFormat", "TaskEngine", "UserState"):
         logging.getLogger(name).setLevel(logging.CRITICAL)
 
 
