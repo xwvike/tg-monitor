@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import zipfile
 
+from core.tg_format import esc
+
 logger = logging.getLogger("FilePipeline")
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
@@ -46,6 +48,11 @@ MAX_INLINE_PRODUCTS = 8
 CMD_TIMEOUT = 180  # 单条 bash 命令超时（秒）
 PLAN_TIMEOUT = 150  # 单次规划调用超时（秒）
 ROUTER_TIMEOUT = 20  # 意图兜底判定超时（秒）
+
+# 文本类产物：转写稿、提取的文字等，用户是要"读"而不是"下载"
+TEXT_EXTS = {".txt", ".srt", ".vtt", ".md", ".csv", ".json"}
+# 超过这个长度就仍按文件发送，避免刷屏
+INLINE_TEXT_MAX_CHARS = 3000
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif", ".gif"}
 VIDEO_EXTS = {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv", ".m4v"}
@@ -77,6 +84,24 @@ RECIPE_INDEX = [
         "file": "video_to_gif.md",
         "exts": {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv"},
         "keywords": ["gif", "动图", "表情包"],
+    },
+    {
+        "file": "media_transcribe.md",
+        "exts": {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v",
+                 ".mp3", ".m4a", ".wav", ".ogg", ".oga", ".flac", ".aac", ".opus"},
+        "keywords": [
+            "转文字", "转写", "语音识别", "说了什么", "讲了什么", "提取对话",
+            "提取台词", "字幕", "听写", "会议记录", "转成文字", "文字稿",
+        ],
+    },
+    {
+        "file": "document_convert.md",
+        "exts": {".md", ".markdown", ".html", ".htm", ".docx", ".odt",
+                 ".epub", ".rst", ".txt", ".tex"},
+        "keywords": [
+            "转word", "转docx", "转md", "转markdown", "转html", "转网页",
+            "转epub", "转电子书", "转txt", "格式转换", "转成word", "转rst",
+        ],
     },
     {
         "file": "video_compression.md",
@@ -132,6 +157,9 @@ PROCESS_PHRASES = [
     "静音", "变速", "加速", "减速", "帧率", "码率", "导出", "另存",
     "转pdf", "转word", "transcode", "转docx", "转md", "转markdown",
     "剪辑", "剪掉", "剪去", "掐头去尾", "合并视频", "拼接视频", "接起来",
+    "转文字", "转写", "语音识别", "提取对话", "提取台词", "字幕", "听写",
+    "文字稿", "转成文字", "会议记录", "转word", "转docx", "转html", "转网页", "转epub",
+    "转电子书", "转txt", "格式转换", "转成word",
     "去掉", "删掉", "秒到", "秒删", "秒剪",
     "太大", "压压", "转图片", "转成图", "转为图", "转png", "转jpg", "转jpeg",
     "按页", "每页", "拆成图", "分页",
@@ -252,6 +280,23 @@ def call_agy(prompt, model, timeout):
 # ------------------------------------------------------------------------------
 
 
+# 对**音视频**而言，"说了什么/讲了什么"要的是把话转成文字，而不是让模型去
+# 描述画面 —— 视觉问答链路拿到视频也听不懂音轨。同样的问法对图片则确实是问答。
+SPEECH_QA_PHRASES = (
+    "说了什么", "讲了什么", "说什么", "讲什么", "说了啥", "讲了啥",
+    "聊了什么", "内容是什么", "在说什么",
+)
+SPEECH_MEDIA_EXTS = (
+    VIDEO_EXTS | AUDIO_EXTS | {".m4v", ".oga"}
+)
+
+
+def _is_speech_media(file_names):
+    return any(
+        os.path.splitext(n)[1].lower() in SPEECH_MEDIA_EXTS for n in file_names
+    )
+
+
 def classify_intent(caption, file_names, model):
     """判断是"物理处理"还是"视觉问答"。返回 (is_processing, how)。
 
@@ -263,6 +308,11 @@ def classify_intent(caption, file_names, model):
         return False, "empty"
 
     low = caption.lower()
+
+    # 音视频 + "讲了什么"这类问法 → 实际需求是语音转写
+    if _is_speech_media(file_names) and any(p in low for p in SPEECH_QA_PHRASES):
+        return True, "keyword"
+
     proc_hits = [p for p in PROCESS_PHRASES if p in low]
     qa_hits = [p for p in QA_PHRASES if p in low]
 
@@ -435,6 +485,17 @@ def probe_file(path):
 # ------------------------------------------------------------------------------
 
 
+def extract_rejection(output):
+    """取出 Planner 的拒绝说明。
+
+    需求本身不成立时（视频转 Word 之类），硬凑命令只会失败并回一句
+    "未能输出合法的命令序列" —— 那是把"做不到"伪装成了"格式错误"。
+    给它一条明确的拒绝通道，用户才能拿到有用的解释。
+    """
+    m = re.search(r"<reject>(.*?)</reject>", output, re.DOTALL)
+    return " ".join(m.group(1).split()) if m else ""
+
+
 def _extract_commands(output):
     """从 Planner 输出里提取命令数组。优先 <json> 标签，再退到代码块与裸数组。"""
     candidates = []
@@ -490,7 +551,10 @@ def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
         "执行环境不会为你定义任何变量。\n"
         "3. 需要临时文件时，放在输出目录下并在最后一条命令中删除，不要用 /tmp 里的固定文件名。\n"
         "4. 不要读取、解析或向用户描述文件内容；只做转换。\n"
-        "5. 只输出被 <json></json> 包裹的字符串数组，数组外不要有任何解释文字。\n\n"
+        "5. 只输出被 <json></json> 包裹的字符串数组，数组外不要有任何解释文字。\n"
+        "6. **若该需求在技术上不成立**（例如把视频转成 Word、把音频转成图片这类\n"
+        "   源格式与目标格式毫无关系的要求），不要硬凑命令，改为输出\n"
+        "   <reject>一句话说明为什么做不到，并给出可行的替代做法</reject>\n\n"
         f"输出格式示例：\n<json>[\"convert /abs/in.jpg -strip -quality 70 {workspace_out}/out.jpg\"]</json>"
     )
 
@@ -662,6 +726,15 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
             if err_kind == "timeout":
                 return False, [], f"⏰ 规划超时（超过 {PLAN_TIMEOUT} 秒），请简化需求后重试。"
             return False, [], "❌ AGY 规划调用失败，未能返回任何内容（可能是网络或模型侧异常）。"
+
+        rejection = extract_rejection(output)
+        if rejection:
+            logger.info(f"Planner 判定需求不成立: {rejection}")
+            return False, [], (
+                "🤔 <b>这个需求恐怕做不到</b>\n"
+                "──────────────────────\n"
+                f"{esc(rejection)}"
+            )
 
         commands = _extract_commands(output)
         if not commands:

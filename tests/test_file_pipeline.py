@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -120,7 +121,8 @@ def test_recipe_selection(s):
             ["image_compression.md"])
     s.check("转GIF意图", [n for n, _ in fp.select_recipes(["v.mp4"], "转gif")][:1],
             ["video_to_gif.md"])
-    s.check("无命中", fp.select_recipes(["x.txt"], "随便弄弄"), [])
+    # 注意：.txt 现由 document_convert.md 覆盖，这里用真正无对应菜谱的扩展名
+    s.check("无命中", fp.select_recipes(["x.xyz"], "随便弄弄"), [])
 
     s.section("菜谱与索引一致性")
     for entry in fp.RECIPE_INDEX:
@@ -240,8 +242,10 @@ def test_video_trim_routing(s):
         picked = [n for n, _ in fp.select_recipes(vids, caption)]
         s.check(f"{caption!r} 首选", picked[0] if picked else None, "video_to_gif.md")
 
-    s.section("视频问答不得被误判为处理")
-    for caption in ("这个视频讲了什么", "帮我看看这段视频", "里面说了什么"):
+    s.section("视觉类问答仍走问答链路")
+    # "讲了什么/说了什么"对音视频已改判为转写（见 test_speech_media_intent），
+    # 此处只校验真正的视觉提问不被误判为处理
+    for caption in ("帮我看看这段视频", "画面里是什么", "这是什么场景"):
         proc, _ = fp.classify_intent(caption, vids, "m")
         s.check(f"{caption!r} 判为问答", proc, False)
 
@@ -354,6 +358,147 @@ def test_probe_reports_bitrate(s):
         s.truthy("含时长", "时长" in meta)
         s.truthy("含分辨率", "320x240" in meta)
         s.truthy("含码率", "码率" in meta and "kbps" in meta)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_speech_media_intent(s):
+    """音视频问"讲了什么"要的是转写，不是让模型描述画面。"""
+    s.section("音视频 → 判为处理（转写）")
+    for names in (["clip.mp4"], ["rec.m4a"], ["v.mkv"], ["a.wav"]):
+        for caption in ("讲了什么", "说了什么", "里面在说什么", "聊了什么"):
+            proc, how = fp.classify_intent(caption, names, "m")
+            s.check(f"{names[0]} {caption!r}", (proc, how), (True, "keyword"))
+
+    s.section("图片/PDF → 同样问法仍是视觉问答")
+    for names in (["photo.jpg"], ["report.pdf"], ["shot.png"]):
+        for caption in ("讲了什么", "说了什么", "这是什么"):
+            proc, _ = fp.classify_intent(caption, names, "m")
+            s.check(f"{names[0]} {caption!r} 判为问答", proc, False)
+
+    s.section("转写菜谱的必备参数")
+    body = _read_recipe("media_transcribe.md")
+    curls = [ln for ln in body.splitlines()
+             if ln.strip().startswith("curl") and "transcriptions" in ln]
+    s.truthy("存在转写请求命令", len(curls) > 0)
+    # 不带 prompt 时 small 模型输出繁体且几乎无标点（已实测）
+    s.check("每条转写请求都带 prompt 引导",
+            [ln for ln in curls if "prompt=" not in ln], [])
+    s.check("每条都指定了 language",
+            [ln for ln in curls if "language=" not in ln], [])
+    s.check("每条都指定了 response_format",
+            [ln for ln in curls if "response_format=" not in ln], [])
+    # 抽轨必须是 Whisper 期望的 16kHz 单声道
+    ffm = [ln for ln in body.splitlines() if ln.strip().startswith("ffmpeg")]
+    s.check("抽轨统一为 16kHz 单声道",
+            [ln for ln in ffm if "-ar 16000" not in ln or "-ac 1" not in ln], [])
+
+    s.section("转写措辞命中 media_transcribe")
+    for caption in ("提取对话", "转成文字", "要字幕", "会议记录", "听写"):
+        picked = [n for n, _ in fp.select_recipes(["clip.mp4"], caption)]
+        s.check(f"{caption!r} 首选", picked[0] if picked else None,
+                "media_transcribe.md")
+
+
+def test_rejection_channel(s):
+    """需求不成立时应给出解释，而不是伪装成"格式错误"。"""
+    s.section("prompt 中声明了拒绝通道")
+    prompt = fp.build_plan_prompt(["/a/clip.mp4"], "/out", "转成word")
+    s.truthy("含 <reject> 说明", "<reject>" in prompt)
+    s.truthy("举了不成立的例子", "视频转成 Word" in prompt or "毫无关系" in prompt)
+
+    s.section("解析")
+    s.check("提取拒绝理由",
+            fp.extract_rejection("<reject>视频与 Word 没有转换关系</reject>"),
+            "视频与 Word 没有转换关系")
+    s.check("正常命令不误判", fp.extract_rejection('<json>["echo x"]</json>'), "")
+
+    s.section("端到端：拒绝而非报格式错误")
+    work = tempfile.mkdtemp()
+    original = fp.call_agy
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        with open(os.path.join(win, "clip.mp4"), "w") as fh:
+            fh.write("x")
+        _reason = (
+            "<reject>视频是画面与声音，与 Word 文档没有转换关系。"
+            "若你要的是台词，可以做语音转写。</reject>"
+        )
+        fp.call_agy = lambda p, m, t: (True, _reason, None)
+        ok, products, err = fp.plan_and_execute(
+            [os.path.join(win, "clip.mp4")], win, wout, "转成word", "m")
+        s.check("判为不成功", ok, False)
+        s.check("无产物", products, [])
+        s.truthy("给出了理由", "没有转换关系" in err)
+        s.truthy("给出了替代做法", "语音转写" in err)
+        s.check("未伪装成格式错误", "未能输出合法" in err, False)
+    finally:
+        fp.call_agy = original
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_document_convert_boundaries(s):
+    """文档菜谱必须写清能力边界，否则模型会硬凑不成立的转换。"""
+    body = _read_recipe("document_convert.md")
+
+    s.section("边界声明")
+    s.truthy("说明不能输出 PDF", "PDF" in body and "LaTeX" in body)
+    s.truthy("说明音视频图片无法转文档", "视频" in body and "没有转换关系" in body)
+    s.truthy("指引 PDF 取文本用 pdftotext", "pdftotext" in body)
+    s.truthy("要求不成立时输出 reject", "<reject>" in body)
+
+    s.section("路由")
+    for names, caption, expected in (
+        (["note.md"], "转word", "document_convert.md"),
+        (["a.docx"], "转md", "document_convert.md"),
+        (["p.html"], "转epub", "document_convert.md"),
+    ):
+        picked = [n for n, _ in fp.select_recipes(names, caption)]
+        s.check(f"{names[0]} {caption!r}", picked[0] if picked else None, expected)
+
+    s.section("音视频不得命中文档菜谱")
+    for names in (["clip.mp4"], ["rec.m4a"], ["photo.jpg"]):
+        picked = [n for n, _ in fp.select_recipes(names, "转成word")]
+        s.check(f"{names[0]}", "document_convert.md" in picked, False)
+
+
+def test_inline_text_products(s):
+    """转写稿这类文本产物应直接作为消息发出，而不是让用户下载附件。"""
+    s.section("扩展名与阈值")
+    s.truthy(".txt 属于文本类", ".txt" in fp.TEXT_EXTS)
+    s.truthy(".srt 属于文本类", ".srt" in fp.TEXT_EXTS)
+    s.truthy("有长度上限", fp.INLINE_TEXT_MAX_CHARS > 0)
+
+    from core.handlers import agy_handler as ah
+    work = tempfile.mkdtemp()
+    try:
+        sent = []
+
+        class _Bot:
+            def send_chat_action(self, *a, **k):
+                pass
+
+            def send_message(self, cid, text, **k):
+                sent.append(("message", text))
+                return types.SimpleNamespace(message_id=1)
+
+            def send_document(self, cid, fh, **k):
+                sent.append(("document", os.path.basename(fh.name)))
+
+        short = os.path.join(work, "t.txt")
+        with open(short, "w", encoding="utf-8") as fh:
+            fh.write("今天的会议讨论了三个议题")
+        ah._send_product(_Bot(), 1, 1, short)
+        s.check("短文本作为消息发出", sent[-1][0], "message")
+        s.truthy("消息含正文", "三个议题" in sent[-1][1])
+
+        long_path = os.path.join(work, "big.txt")
+        with open(long_path, "w", encoding="utf-8") as fh:
+            fh.write("x" * (fp.INLINE_TEXT_MAX_CHARS + 100))
+        ah._send_product(_Bot(), 1, 1, long_path)
+        s.check("超长仍作为附件", sent[-1][0], "document")
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -632,6 +777,10 @@ SUITES = [
     ("图片转PDF路由", test_image_to_pdf_routing),
     ("视频剪辑路由", test_video_trim_routing),
     ("视频压缩路由", test_video_compression_routing),
+    ("语音类意图", test_speech_media_intent),
+    ("拒绝通道", test_rejection_channel),
+    ("文档转换边界", test_document_convert_boundaries),
+    ("文本产物内联", test_inline_text_products),
     ("压缩菜谱要点", test_video_compression_recipe_params),
     ("码率探针", test_probe_reports_bitrate),
     ("剪辑菜谱要点", test_video_trim_recipe_params),

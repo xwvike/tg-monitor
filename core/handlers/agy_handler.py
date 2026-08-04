@@ -24,7 +24,9 @@ sys.path.append(
 )
 from core.file_pipeline import (
     AUDIO_EXTS,
+    INLINE_TEXT_MAX_CHARS,
     INTERNAL_MARKER,
+    TEXT_EXTS,
     TG_UPLOAD_LIMIT_BYTES,
     VIDEO_EXTS,
     agy_env,
@@ -34,7 +36,7 @@ from core.file_pipeline import (
     safe_filename,
 )
 from core.stt import transcribe_voice_file
-from core.tg_format import esc, send_html
+from core.tg_format import code_block, esc, send_html
 from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_speak
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
@@ -138,6 +140,23 @@ def _send_product(bot, chat_id, reply_to, path):
     那会直接抵消掉压缩/画质类任务的全部意义。
     """
     ext = os.path.splitext(path)[1].lower()
+
+    # 文本类产物（转写稿、提取的文字）用户是要读的，直接作为消息发出更顺手；
+    # 过长才退回附件，避免刷屏
+    if ext in TEXT_EXTS:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                content = fh.read().strip()
+        except Exception:
+            content = ""
+        if content and len(content) <= INLINE_TEXT_MAX_CHARS:
+            send_html(
+                bot, chat_id,
+                f"📝 <b>{esc(os.path.basename(path))}</b>\n{code_block(content)}",
+                reply_to_message_id=reply_to,
+            )
+            return
+
     with open(path, "rb") as fh:
         if ext == ".gif":
             bot.send_chat_action(chat_id, "upload_video")
