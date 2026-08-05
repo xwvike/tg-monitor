@@ -41,7 +41,16 @@ from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_sp
 
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 BRAIN_DIR = os.path.expanduser("~/.gemini/antigravity-cli/brain")
-WORKSPACE_ROOT = "/tmp/tg_files"
+
+# 工作区必须落在**真实磁盘**上，不能用 /tmp —— 本机 /tmp 是 tmpfs，占的是内存
+# （3.8G 上限，而可用内存只有 2.6G）。输入文件本身受 MAX_TG_FILE_SIZE 约束还好，
+# 但视频转码的中间产物不受它约束：抽帧、调色板、重编码的峰值轻易上 GB，
+# 落在 tmpfs 上就是直接吃内存，撞上去表现为"任务莫名其妙失败"，极难排查。
+# 放大 tmpfs 解决不了问题 —— 它本来就是内存，放大只会让 OOM 来得更狠。
+_PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+WORKSPACE_ROOT = os.getenv(
+    "TG_WORKSPACE_ROOT", os.path.join(_PROJECT_DIR, "workspace")
+)
 MAX_TG_FILE_SIZE = 20 * 1024 * 1024
 MEDIA_GROUP_WINDOW = 2.5  # 相册各分片是独立 message，需要一个收集窗口攒成单次任务
 FILE_CAPTION_WINDOW = 3.5  # 无附言的文件先等一个窗口，接住用户随后补打的那句指令
@@ -269,7 +278,8 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
 def sweep_workspaces():
     """启动时清空遗留的文件工作区。
 
-    进程被 kill 或重启时，正在处理的任务走不到清理分支，其工作区会永久留在 /tmp。
+    进程被 kill 或重启时，正在处理的任务走不到清理分支，其工作区会永久留下。
+    工作区在真实磁盘上（不再是重启即清空的 tmpfs），这道清扫是唯一的回收点。
     启动那一刻不可能有任务在飞，因此整体清空是安全的。
     """
     removed = 0

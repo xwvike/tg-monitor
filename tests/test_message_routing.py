@@ -381,6 +381,50 @@ def test_conversation_isolation(s):
         s.check("实际会话列表中无 Planner 残留", polluted, [])
 
 
+def test_workspace_not_on_tmpfs(s):
+    """工作区必须落在真实磁盘上。
+
+    放 /tmp 会占内存：本机 /tmp 是 tmpfs（3.8G 上限，可用内存仅 2.6G），
+    而视频转码的中间产物不受 MAX_TG_FILE_SIZE 约束，峰值轻易上 GB。
+    这个回归不会报错，只会表现为"任务莫名其妙失败"，所以必须由测试守住。
+    """
+    import importlib
+    import subprocess
+
+    s.section("默认位置")
+    # 注意：模块级 WORKSPACE_ROOT 已被本测试文件改写成临时目录，
+    # 因此重新读一份未被污染的默认值
+    src = importlib.import_module("core.handlers.agy_handler")
+    default = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(src.__file__))),
+        "..", "workspace",
+    )
+    s.check("默认值不在 /tmp 下",
+            os.path.normpath(default).startswith("/tmp"), False)
+
+    s.section("实际挂载点不是 tmpfs")
+    probe = os.path.normpath(default)
+    while not os.path.exists(probe) and probe != "/":
+        probe = os.path.dirname(probe)
+    fstype = subprocess.run(
+        ["stat", "-f", "-c", "%T", probe],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    # 只断言"不是内存盘"—— 具体是 ext4 / btrfs / overlayfs 都无所谓，
+    # 写死某个文件系统会让干净容器里的部署验证误报
+    s.check(f"{probe} 的文件系统 ({fstype or '?'}) 不是内存盘",
+            fstype in ("tmpfs", "ramfs"), False)
+
+    s.section("可被环境变量覆盖")
+    s.truthy("读取 TG_WORKSPACE_ROOT",
+             "TG_WORKSPACE_ROOT" in _read_source(src.__file__))
+
+
+def _read_source(path):
+    with open(path, encoding="utf-8") as fh:
+        return fh.read()
+
+
 def test_tg_photo_flag(s):
     """以「图片」方式上传的文件已被 Telegram 转码缩图，必须传到下游并如实告知。
 
@@ -475,6 +519,7 @@ SUITES = [
     ("对话模式守卫", test_handlers_respect_chat_mode),
     ("落盘文件名收敛", test_ingest_sanitizes_filename),
     ("会话隔离", test_conversation_isolation),
+    ("工作区不在内存盘", test_workspace_not_on_tmpfs),
     ("Telegram 图片打标", test_tg_photo_flag),
     ("工作区清扫", test_workspace_sweep),
 ]
