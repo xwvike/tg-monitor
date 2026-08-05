@@ -8,7 +8,7 @@
   - `core/bot.py`: Telegram 机器人 Layer 0 微内核 (动态时间戳版本 vYYYY.MM.DD-HHMM)
   - `core/task_engine.py`: 声明式动态任务调度引擎 (APScheduler + 语法防错 + 热加载)
   - `core/file_pipeline.py`: **文件处理流水线** —— 意图判定、菜谱检索、元数据探针、
-    Planner 规划、命令执行与错误回喂、产物回收（详见 `ARCHITECTURE.md`）
+    Planner 规划、命令执行与错误回喂、产物回收
   - `core/tg_format.py`: Telegram HTML 转义与安全发送（解析失败自动降级重发）
   - `core/user_state.py`: 会话状态持久化（原子写 + 线程锁 + 损坏留档）
   - `core/tts.py`: 独立两阶段 TTS 语音合成与 OGG/Opus 转码流水线引擎
@@ -33,8 +33,10 @@
   - `jobs/check_claude_rss.py`: Claude Code RSS 监控与 AI 中文翻译脚本
 - **运维与自救工具 (`bin/`)**:
   - `bin/manage.sh`: `tg-bot` 控制与自救工具箱 (映射至 `/usr/local/bin/tg-bot`)
-- **架构文档**:
-  - `ARCHITECTURE.md`: 文件处理架构的演进过程与责任边界速查表
+- **文档**:
+  - `README.md`: 系统架构、功能特性、责任边界速查与运维命令 —— 唯一的总览入口
+  - `config/TOOLCHAIN.md`: 服务器现有能力清单（供流水线内联给 Planner）
+  - `config/file_recipes/README.md`: 菜谱清单与编写规范
 - **系统快照库 (`releases/snapshots/`)**:
   - 存放项目全量平滑备份快照包 (`snap_YYYYMMDD_HHMM[_tag].tar.gz`)，上限保留 20 个
 - **日志目录 (`logs/`)**:

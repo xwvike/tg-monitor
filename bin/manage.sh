@@ -34,7 +34,7 @@ create_snapshot() {
     
     # 动态构建包含的项目，保证 requirements.txt 等新文件自动被打包
     local include_items=()
-    for item in core config jobs bin tests requirements.txt README.md GEMINI.md AGENTS.md ARCHITECTURE.md install.sh; do
+    for item in core config jobs bin tests requirements.txt README.md GEMINI.md AGENTS.md install.sh; do
         if [ -e "$PROJECT_DIR/$item" ]; then
             include_items+=("$item")
         fi

@@ -49,7 +49,7 @@ graph TD
         TaskEngineService -->|发送通知| BotAPI
         
         TGBotCLI <-->|快照与救援| Snapshots["📸 releases/snapshots/"]
-        TGBotCLI -->|沙箱四级校验| Tests["🧪 tests/ (257 项断言)"]
+        TGBotCLI -->|沙箱四级校验| Tests["🧪 tests/"]
     end
 ```
 
@@ -101,7 +101,25 @@ graph TD
 - **安全收敛**: 外部文件名先经 `safe_filename()` 中和 shell 元字符 —— 路径会原样进入
   执行的命令，不收敛即构成命令注入。
 
-> 架构演进过程与责任边界速查表见 `ARCHITECTURE.md`。
+#### 责任边界速查
+
+这条线画在哪里决定了稳定性：**确定的事交给代码，不确定的事才交给模型**。
+
+| 环节 | 归属 | 位置 |
+|------|------|------|
+| 文件落盘、相册聚合、文字合并 | Python | `core/handlers/agy_handler.py` |
+| 意图判定（关键词短路） | Python | `classify_intent()` |
+| 意图判定（真模糊时） | LLM | `classify_intent()` 兜底分支 |
+| 菜谱与工具链检索 | Python | `select_recipes()` / `load_toolchain()` |
+| 元数据探针 | Python | `probe_file()` |
+| **需求 → bash 命令** | **LLM** | `build_plan_prompt()` |
+| 命令执行与错误捕获 | Python | `execute_commands()` |
+| **读懂报错并修正命令** | **LLM** | 回喂重规划（`MAX_PLAN_ATTEMPTS`） |
+| 产物回收、打包与投递 | Python | `collect_outputs()` / `package_products()` / `_send_product()` |
+
+Planner 拿不到实体文件是刻意的：多模态模型看见图片的第一本能是描述它，
+在处理任务里传图会让它丢掉动作指令、转而向用户解说图片内容。
+
 > 新增菜谱需同时写 `.md` 并在 `RECIPE_INDEX` 中注册，详见 `config/file_recipes/README.md`。
 
 ### 4. 🧪 四级发布闸门 (`tests/`)
@@ -111,7 +129,7 @@ graph TD
 | 级别 | 内容 |
 |---|---|
 | `[1/4]` | 语法预检（扫描 `core/` 与 `jobs/` 全部 Python 文件） |
-| `[2/4]` | **业务逻辑单元测试**（`tests/run_all.py`，257 项断言，零外部依赖） |
+| `[2/4]` | **业务逻辑单元测试**（`tests/run_all.py`，零外部依赖） |
 | `[3/4]` | Telegram API 联调探针 |
 | `[4/4]` | AGY 引擎底层探针 |
 

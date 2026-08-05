@@ -170,7 +170,7 @@ def test_gif_recipe_params(s):
 def test_recipes_stay_concise(s):
     """菜谱会被整段内联进 Planner 的 prompt，篇幅本身就是成本。
 
-    论证性内容（实测数据表、参数取舍的推理）属于提交记录与 ARCHITECTURE.md，
+    论证性内容（实测数据表、参数取舍的完整推理）属于提交记录，
     不属于操作手册 —— 它既烧 token 又稀释指令。
     """
     s.section("篇幅上限")
@@ -207,12 +207,24 @@ def test_docs_reference_real_files(s):
     pattern = re.compile(
         r"`((?:core|tests|config|jobs|bin)/[A-Za-z0-9_./-]+\.(?:py|md|sh|yaml|json))`"
     )
-    for doc in ("README.md", "GEMINI.md", "ARCHITECTURE.md"):
+    for doc in ("README.md", "GEMINI.md"):
         doc_path = os.path.join(PROJECT_DIR, doc)
         if not os.path.exists(doc_path):
             continue
         for rel in sorted(set(pattern.findall(_read(doc_path)))):
             s.check(f"{doc} → {rel}", os.path.exists(os.path.join(PROJECT_DIR, rel)), True)
+
+
+def test_docs_avoid_rotting_counts(s):
+    """文档不得写死断言条数 —— 它每加一个测试就过期一次，且无人会去改。
+
+    README 里那句"257 项断言"就是这么一路停在 257 的，直到实际有 600 多项。
+    """
+    s.section("无写死的断言条数")
+    for doc in ("README.md", "GEMINI.md"):
+        body = _read(os.path.join(PROJECT_DIR, doc))
+        s.check(f"{doc} 未写死断言条数",
+                re.findall(r"\d+\s*项断言", body), [])
 
 
 def test_snapshot_manifest_consistency(s):
@@ -249,6 +261,7 @@ def test_sandbox_level_count_matches_docs(s):
 
 SUITES = [
     ("文档引用完整性", test_docs_reference_real_files),
+    ("文档无过期计数", test_docs_avoid_rotting_counts),
     ("快照清单一致性", test_snapshot_manifest_consistency),
     ("沙箱级数一致性", test_sandbox_level_count_matches_docs),
     ("入口函数一致性", test_python_entrypoints_exist),
