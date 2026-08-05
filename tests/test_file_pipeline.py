@@ -464,6 +464,60 @@ def test_document_convert_boundaries(s):
         s.check(f"{names[0]}", "document_convert.md" in picked, False)
 
 
+def test_office_convert_recipe(s):
+    """Office 菜谱必须守住两条实测结论，并与 pandoc 菜谱分工清晰。"""
+    body = _read_recipe("office_convert.md")
+
+    s.section("实测结论")
+    # libreoffice 加载失败时只在 stdout 报错，退出码仍是 0 —— 这是那次
+    # xls→pdf 失败被误判为成功的根因，菜谱必须显式点出来。
+    # 断言落在**同一行**上：只留"不能靠退出码判断"而删掉"仍是 0"的版本
+    # 会让模型以为退出码非零就代表失败，必须判失败。
+    s.truthy("有一行明确写出失败时退出码为 0",
+             any("退出码" in ln and "0" in ln for ln in body.splitlines()))
+    s.truthy("引用了失败时的实际报错串",
+             "source file could not be loaded" in body)
+    s.truthy("给出可信判据是产物是否存在", "产物是否存在" in body)
+    # 缺少独立 profile 时并发实例会静默退出、不产出文件
+    s.truthy("要求独立 UserInstallation", "-env:UserInstallation" in body)
+
+    s.section("命令形态")
+    cmds = [ln for ln in body.splitlines() if ln.strip().startswith("soffice")]
+    s.truthy("存在转换命令", len(cmds) > 0)
+    s.check("每条都是 headless",
+            [ln for ln in cmds if "--headless" not in ln], [])
+    s.check("每条都带独立 profile",
+            [ln for ln in cmds if "-env:UserInstallation" not in ln], [])
+    s.check("每条都指定 --outdir",
+            [ln for ln in cmds if "--outdir" not in ln], [])
+
+    s.section("与 pandoc 菜谱的分工")
+    for names, caption, expected in (
+        (["表.xls"], "转成pdf", "office_convert.md"),
+        (["表.xlsx"], "导出pdf", "office_convert.md"),
+        (["稿.doc"], "转pdf", "office_convert.md"),
+        (["讲义.pptx"], "转pdf", "office_convert.md"),
+        (["a.docx"], "转成pdf", "office_convert.md"),
+        # 文本结构互转仍归 pandoc
+        (["a.docx"], "转md", "document_convert.md"),
+        (["note.md"], "转word", "document_convert.md"),
+    ):
+        picked = [n for n, _ in fp.select_recipes(names, caption)]
+        s.check(f"{names[0]} {caption!r}", picked[0] if picked else None, expected)
+
+    s.section("不得跨类型污染")
+    for names in (["clip.mp4"], ["photo.jpg"], ["r.pdf"]):
+        picked = [n for n, _ in fp.select_recipes(names, "转成pdf")]
+        s.check(f"{names[0]}", "office_convert.md" in picked, False)
+
+    s.section("Office 措辞被判为物理处理")
+    # 必须由关键词直接判定：走到 how=="model" 意味着要为一句
+    # 「转excel」多跑一次 agy 往返，且结论随模型漂移
+    for caption in ("转成pdf", "导出pdf", "打印成pdf", "转excel", "转幻灯片"):
+        proc, how = fp.classify_intent(caption, ["表.xls"], "m")
+        s.check(f"{caption!r}", (proc, how), (True, "keyword"))
+
+
 def test_inline_text_products(s):
     """转写稿这类文本产物应直接作为消息发出，而不是让用户下载附件。"""
     s.section("扩展名与阈值")
@@ -780,6 +834,7 @@ SUITES = [
     ("语音类意图", test_speech_media_intent),
     ("拒绝通道", test_rejection_channel),
     ("文档转换边界", test_document_convert_boundaries),
+    ("Office 转换菜谱", test_office_convert_recipe),
     ("文本产物内联", test_inline_text_products),
     ("压缩菜谱要点", test_video_compression_recipe_params),
     ("码率探针", test_probe_reports_bitrate),

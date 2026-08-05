@@ -104,6 +104,16 @@ RECIPE_INDEX = [
         ],
     },
     {
+        "file": "office_convert.md",
+        "exts": {".xls", ".xlsx", ".doc", ".docx", ".ppt", ".pptx",
+                 ".ods", ".odt", ".odp", ".rtf"},
+        "keywords": [
+            "转pdf", "转成pdf", "转为pdf", "导出pdf", "打印成pdf", "存成pdf",
+            "转excel", "转xlsx", "转ppt", "转pptx", "转表格", "转幻灯片",
+            "另存为",
+        ],
+    },
+    {
         "file": "video_compression.md",
         "exts": {".mp4", ".mov", ".avi", ".webm", ".mkv", ".flv", ".m4v"},
         "keywords": [
@@ -165,6 +175,8 @@ PROCESS_PHRASES = [
     "按页", "每页", "拆成图", "分页",
     "转成pdf", "做成pdf", "合成pdf", "合并成pdf", "生成pdf", "打包成pdf",
     "转html", "转epub", "电子书", "分割", "切割", "截取", "降噪",
+    "转为pdf", "打印成pdf", "存成pdf", "转excel", "转xlsx", "转ppt",
+    "转pptx", "转表格", "转幻灯片", "另存为",
     "compress", "resize", "crop", "rotate", "merge", "stitch", "watermark",
     "extract audio", "convert to",
 ]
@@ -551,8 +563,11 @@ def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
         "执行环境不会为你定义任何变量。\n"
         "3. 需要临时文件时，放在输出目录下并在最后一条命令中删除，不要用 /tmp 里的固定文件名。\n"
         "4. 不要读取、解析或向用户描述文件内容；只做转换。\n"
-        "5. 只输出被 <json></json> 包裹的字符串数组，数组外不要有任何解释文字。\n"
-        "6. **若该需求在技术上不成立**（例如把视频转成 Word、把音频转成图片这类\n"
+        "5. **你只负责产出命令，不要自己动手执行任何东西**：不得安装软件包\n"
+        "   （apt/pip/npm 等）、不得改动系统配置、不得试运行命令。缺少工具时\n"
+        "   改用现有工具链完成，或按第 7 条说明做不到的原因。\n"
+        "6. 只输出被 <json></json> 包裹的字符串数组，数组外不要有任何解释文字。\n"
+        "7. **若该需求在技术上不成立**（例如把视频转成 Word、把音频转成图片这类\n"
         "   源格式与目标格式毫无关系的要求），不要硬凑命令，改为输出\n"
         "   <reject>一句话说明为什么做不到，并给出可行的替代做法</reject>\n\n"
         f"输出格式示例：\n<json>[\"convert /abs/in.jpg -strip -quality 70 {workspace_out}/out.jpg\"]</json>"
@@ -751,6 +766,11 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
         exec_ok, failure = execute_commands(commands, workspace_in)
         if not exec_ok:
             retry_reason = "error"
+            if attempt < MAX_PLAN_ATTEMPTS:
+                logger.warning(
+                    f"第 {attempt} 轮执行失败，回喂重规划: "
+                    f"{(failure or {}).get('stderr', '')[:200]}"
+                )
 
         if exec_ok:
             products = collect_outputs(workspace_in, workspace_out, original_inputs)
@@ -778,6 +798,12 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
                     continue
                 return True, products, None
             # 命令全绿但没产物，同样值得回喂重来
+            # 有些工具（如 libreoffice 缺少组件时）会**报错却返回 0**，
+            # 只看返回码抓不到，必须以"有没有产物"为准
+            logger.warning(
+                "命令全部返回 0 但输出目录为空，回喂重规划。最后一条命令: "
+                f"{commands[-1][:200]}"
+            )
             failure = {
                 "cmd": commands[-1],
                 "stderr": "所有命令返回码为 0，但输出目录中没有任何文件。请检查输出路径是否写对。",

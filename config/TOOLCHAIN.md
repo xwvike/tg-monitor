@@ -110,6 +110,21 @@
   如需 PDF，先 `pandoc` 转 HTML/docx，或改用其他路径。
 - **调用示例**: `pandoc INPUT.md -o OUTPUT.docx`
 
+### LibreOffice (headless)
+- **类型**: 系统二进制
+- **路径**: `/usr/bin/soffice`（`libreoffice` 为同一程序的别名）
+- **能力**:
+  - Office 文档转 PDF (xls/xlsx/doc/docx/ppt/pptx/odt/ods/odp → pdf)
+  - Office 格式互转 (xlsx ↔ csv、docx ↔ odt 等)
+- **⚠️ 报错时仍返回 0**: 缺少对应组件或文件损坏时只在 stderr 打印
+  `Error: source file could not be loaded`，退出码依然是 0 —— 判断成败必须
+  看**产物是否真的生成**，不能只看返回码。
+- **⚠️ 需要独立的用户配置目录**: 共用默认 profile 时并发调用会抢锁，实测
+  4 个并发有 1 个失败（退出码 1、无产物）。必须为每次转换指定
+  `-env:UserInstallation`。
+- **调用示例**:
+  `soffice --headless -env:UserInstallation=file:///tmp/lo_$$ --convert-to pdf --outdir OUTDIR INPUT.xlsx`
+
 ### Ghostscript
 - **类型**: 系统二进制
 - **路径**: `/usr/bin/gs`

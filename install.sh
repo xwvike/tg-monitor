@@ -40,6 +40,16 @@ declare -A TOOLCHAIN=(
     [pdfimages]=poppler-utils
     [pdftoppm]=poppler-utils
     [gs]=ghostscript
+    [soffice]=libreoffice-core-nogui
+)
+
+# 有些能力**无法靠"命令是否存在"判断**：soffice 二进制由 core 提供，
+# 但缺了 calc/writer/impress 组件就读不了对应格式，而 libreoffice
+# 报错时仍返回 0 —— 只会静默产不出文件。这类必须直接查包。
+declare -a REQUIRED_PKGS=(
+    libreoffice-calc      # xls / xlsx / csv
+    libreoffice-writer    # doc / docx / odt
+    libreoffice-impress   # ppt / pptx
 )
 
 CHECK_ONLY=false
@@ -150,6 +160,15 @@ if $CHECK_ONLY; then
         fi
     done
 
+    step "无法由命令名判断的组件包"
+    for pkg in "${REQUIRED_PKGS[@]}"; do
+        if dpkg -s "$pkg" >/dev/null 2>&1; then
+            ok "$pkg"
+        else
+            bad "$pkg 缺失 — soffice 存在但读不了对应格式，且失败时仍返回 0"
+        fi
+    done
+
     step "AGY 智能体引擎"
     if [ -x "$AGY_BIN" ]; then
         ok "agy 已安装: $("$AGY_BIN" --version 2>&1 | head -n1)"
@@ -254,6 +273,9 @@ step "[2/7] 安装系统工具链"
 missing_pkgs=()
 for cmd in "${!TOOLCHAIN[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || missing_pkgs+=("${TOOLCHAIN[$cmd]}")
+done
+for pkg in "${REQUIRED_PKGS[@]}"; do
+    dpkg -s "$pkg" >/dev/null 2>&1 || missing_pkgs+=("$pkg")
 done
 # 去重
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
