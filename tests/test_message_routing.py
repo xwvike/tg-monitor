@@ -450,7 +450,9 @@ def test_tg_photo_flag(s):
     s.truthy("点明是「图片」方式发送的", "「<b>图片</b>」" in ah.TG_PHOTO_NOTICE)
     s.truthy("说明已转成 JPEG", "JPEG" in ah.TG_PHOTO_NOTICE)
     s.truthy("说明尺寸被缩小", "缩小" in ah.TG_PHOTO_NOTICE)
-    s.truthy("给出正确做法", "「<b>文件</b>」" in ah.TG_PHOTO_NOTICE)
+    # 两条出路都要给：桌面端「压缩」勾选框默认勾上，取消它比改发文件更顺手
+    s.truthy("给出取消勾选压缩的做法", "取消勾选「压缩」" in ah.TG_PHOTO_NOTICE)
+    s.truthy("给出改发文件的做法", "「<b>文件</b>」" in ah.TG_PHOTO_NOTICE)
 
 
 def test_workspace_sweep(s):
