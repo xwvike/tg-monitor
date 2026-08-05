@@ -59,8 +59,6 @@
   工具链清单同时裁掉与文件处理无关的段落（Postgres / Redis / qBittorrent 等纯噪声）。
 - **收益**：省掉整轮往返；"用哪本手册"从概率事件变成确定事件。
 - **代价**：新增菜谱必须同步注册进 `RECIPE_INDEX`，否则不会被命中。
-  菜谱由人写、人审、随代码提交 —— 它决定的是此后**所有**同类任务的走法，
-  这条链路上不留无人复核的环节。
 
 ### 6. 错误回喂：让 Planner 看见自己的执行结果
 - **旧**：`subprocess.run(cmd, shell=True, check=True)`——没有 `capture_output`（ffmpeg
