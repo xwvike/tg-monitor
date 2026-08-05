@@ -135,6 +135,14 @@ def test_recipe_selection(s):
         # 未注册的菜谱永远不会被命中，等于白写
         s.check(f"{fname} 已注册进 RECIPE_INDEX", registered, True)
 
+    s.section("README 的菜谱清单不得过期")
+    with open(os.path.join(fp.RECIPE_DIR, "README.md"), encoding="utf-8") as fh:
+        # 只认表格行：菜谱名在正文别处被顺带提到，不等于它在清单里
+        rows = "\n".join(ln for ln in fh if ln.lstrip().startswith("|"))
+    for entry in fp.RECIPE_INDEX:
+        # 清单是人查"有没有现成菜谱"的第一入口，漏一行就会有人重复造一份
+        s.check(f"{entry['file']} 列入 README 清单", entry["file"] in rows, True)
+
     s.section("菜谱不得含执行环境不存在的占位写法")
     for fname in sorted(os.listdir(fp.RECIPE_DIR)):
         if not fname.endswith(".md") or fname == "README.md":
