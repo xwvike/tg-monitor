@@ -472,6 +472,30 @@ def test_document_convert_boundaries(s):
         s.check(f"{names[0]}", "document_convert.md" in picked, False)
 
 
+def test_image_compression_keeps_format(s):
+    """压缩不该改格式。webp→jpg 实测体积不降反增（31.6 KB → 36.5 KB）。"""
+    body = _read_recipe("image_compression.md")
+
+    s.section("每个分支的输出扩展名与输入一致")
+    for tool, ext in (("pngquant", ".png"), ("convert", ".jpg")):
+        cmds = [ln for ln in body.splitlines() if ln.strip().startswith(tool)]
+        s.truthy(f"{tool} 有命令", len(cmds) > 0)
+    webp = [ln for ln in body.splitlines()
+            if ln.strip().startswith("convert") and ".webp" in ln]
+    s.truthy("存在 webp 分支", len(webp) > 0)
+    # 输入是 webp 的那条命令，产物也必须是 webp
+    s.check("webp 分支不得输出 jpg",
+            [ln for ln in webp if "_compressed.jpg" in ln], [])
+    s.check("webp 分支输出 .webp",
+            [ln for ln in webp if "_compressed.webp" not in ln], [])
+    s.check("png 分支不得输出 jpg",
+            [ln for ln in body.splitlines()
+             if ln.strip().startswith("pngquant") and "_compressed.jpg" in ln], [])
+
+    s.section("输出规范写明不改格式")
+    s.truthy("点明压缩不改变格式", "压缩不改变格式" in body)
+
+
 def test_office_convert_recipe(s):
     """Office 菜谱必须守住两条实测结论，并与 pandoc 菜谱分工清晰。"""
     body = _read_recipe("office_convert.md")
@@ -842,6 +866,7 @@ SUITES = [
     ("语音类意图", test_speech_media_intent),
     ("拒绝通道", test_rejection_channel),
     ("文档转换边界", test_document_convert_boundaries),
+    ("图片压缩保持格式", test_image_compression_keeps_format),
     ("Office 转换菜谱", test_office_convert_recipe),
     ("文本产物内联", test_inline_text_products),
     ("压缩菜谱要点", test_video_compression_recipe_params),

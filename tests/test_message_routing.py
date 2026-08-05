@@ -21,6 +21,9 @@ from core import file_pipeline as fp
 from core.handlers import agy_handler as ah
 from tests.harness import main
 
+# Rig 会把 ah.run_file_task 换成桩，想真跑它必须在那之前留一份引用
+_REAL_RUN_FILE_TASK = ah.run_file_task
+
 # ⚠️ 本模块会 monkeypatch agy_handler 的模块级函数，且会调用 sweep_workspaces()。
 # 绝不能被导入进真正在服务的 bot 进程 —— 仅供 --test-sandbox 与手动执行。
 
@@ -134,8 +137,9 @@ class Rig:
         )
         self.send_photo = self.bot.handlers["handle_photo"]
 
-        ah.run_file_task = lambda b, m, files, wi, wo, cap, mo: self.launched.append(
-            ("PROCESS", cap, len(files), "")
+        ah.run_file_task = (
+            lambda b, m, files, wi, wo, cap, mo, tg_photo=False:
+            self.launched.append(("PROCESS", cap, len(files), "", tg_photo))
         )
         ah.execute_agy_prompt = lambda b, m, p, g, sv, attached_files=None, cleanup_dirs=None: (
             self.launched.append(("QA", p, len(attached_files or []), p))
@@ -377,6 +381,78 @@ def test_conversation_isolation(s):
         s.check("实际会话列表中无 Planner 残留", polluted, [])
 
 
+def test_tg_photo_flag(s):
+    """以「图片」方式上传的文件已被 Telegram 转码缩图，必须传到下游并如实告知。
+
+    症状是"我发的 png 压完变成又小又糊的 jpg" —— 转码发生在客户端，
+    流水线没做错，但沉默会让用户以为是我们弄坏的。
+    """
+    r = Rig()
+
+    s.section("photo 上传打标")
+    r.reset()
+    r.send_photo(photo(80, caption="压缩一下"))
+    time.sleep(SETTLE)
+    s.check("发起了处理任务", len(r.launched), 1)
+    s.check("标记为 Telegram 图片", r.launched[0][4], True)
+
+    s.section("document 上传不打标")
+    r.reset()
+    doc = document(81, name="raw.png")
+    doc.caption = "压缩一下"
+    r.bot.handlers["handle_any_file"](doc)
+    time.sleep(SETTLE)
+    s.check("发起了处理任务", len(r.launched), 1)
+    s.check("未被标记", r.launched[0][4], False)
+
+    s.section("提示真的发出去了（run_file_task 端到端）")
+    for flag, expect in ((True, 1), (False, 0)):
+        work = tempfile.mkdtemp()
+        sent = []
+        try:
+            wout = os.path.join(work, "out")
+            os.makedirs(wout)
+            product = os.path.join(wout, "a_compressed.png")
+            with open(product, "wb") as fh:
+                fh.write(b"\x89PNG" + b"0" * 100)
+
+            class _Bot:
+                def send_message(self, cid, txt, **k):
+                    sent.append(txt)
+                    return types.SimpleNamespace(message_id=1)
+
+                def edit_message_text(self, *a, **k):
+                    pass
+
+                def delete_message(self, *a, **k):
+                    pass
+
+                def send_chat_action(self, *a, **k):
+                    pass
+
+                def send_document(self, *a, **k):
+                    pass
+
+            orig_plan, orig_html = ah.plan_and_execute, ah.send_html
+            ah.plan_and_execute = lambda *a, **k: (True, [product], None)
+            ah.send_html = lambda b, cid, txt, **k: sent.append(txt)
+            try:
+                _REAL_RUN_FILE_TASK(_Bot(), photo(90), [product], work, wout,
+                                    "压缩一下", "m", flag)
+            finally:
+                ah.plan_and_execute, ah.send_html = orig_plan, orig_html
+            s.check(f"tg_photo={flag} 时发出提示的条数",
+                    sum(1 for t in sent if "「<b>图片</b>」" in t), expect)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+    s.section("提示文案")
+    s.truthy("点明是「图片」方式发送的", "「<b>图片</b>」" in ah.TG_PHOTO_NOTICE)
+    s.truthy("说明已转成 JPEG", "JPEG" in ah.TG_PHOTO_NOTICE)
+    s.truthy("说明尺寸被缩小", "缩小" in ah.TG_PHOTO_NOTICE)
+    s.truthy("给出正确做法", "「<b>文件</b>」" in ah.TG_PHOTO_NOTICE)
+
+
 def test_workspace_sweep(s):
     s.section("启动清扫遗留工作区")
     probe_in = os.path.join(ah.WORKSPACE_ROOT, "in", "__sweep_probe__")
@@ -397,6 +473,7 @@ SUITES = [
     ("对话模式守卫", test_handlers_respect_chat_mode),
     ("落盘文件名收敛", test_ingest_sanitizes_filename),
     ("会话隔离", test_conversation_isolation),
+    ("Telegram 图片打标", test_tg_photo_flag),
     ("工作区清扫", test_workspace_sweep),
 ]
 

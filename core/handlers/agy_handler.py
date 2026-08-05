@@ -172,7 +172,18 @@ def _send_product(bot, chat_id, reply_to, path):
             bot.send_document(chat_id, fh, reply_to_message_id=reply_to)
 
 
-def run_file_task(bot, message, file_paths, workspace_in, workspace_out, caption, model):
+# 以「图片」方式上传时，Telegram 客户端会先把文件转成 JPEG 并压掉尺寸，
+# 服务端收到的从来不是原图。不说这一句，用户看到的就是"我发的 png 怎么
+# 变成又小又糊的 jpg"，而那三件事其实都发生在上传阶段。
+TG_PHOTO_NOTICE = (
+    "ℹ️ 这次的图片是以「<b>图片</b>」方式发送的 —— Telegram 在上传时已经把它"
+    "转成 JPEG 并缩小了尺寸，我处理的是这份已经压过一轮的副本。\n"
+    "要基于原图处理（保留 PNG、原始分辨率与画质），请改用「<b>文件</b>」方式发送。"
+)
+
+
+def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
+                  caption, model, tg_photo=False):
     """驱动文件处理流水线，并用单条可编辑消息汇报进度。"""
     chat_id = message.chat.id
     try:
@@ -227,6 +238,8 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out, caption
                     logger.error(f"回传产物 {path} 失败: {e}")
                     send_html(bot, chat_id,
                               f"⚠️ 产物 {esc(os.path.basename(path))} 回传失败: {esc(e)}")
+            if tg_photo:
+                send_html(bot, chat_id, TG_PHOTO_NOTICE)
             if status_msg is not None:
                 try:
                     bot.delete_message(chat_id, status_msg.message_id)
@@ -797,7 +810,8 @@ def register_agy_handlers(
             reply_to_message_id=message.message_id,
         )
 
-    def _launch_file_task(message, workspace_in, workspace_out, caption, context=""):
+    def _launch_file_task(message, workspace_in, workspace_out, caption,
+                          context="", tg_photo=False):
         """意图判定后分流：物理处理走流水线，视觉问答走主对话链路。"""
         try:
             file_paths = sorted(
@@ -826,7 +840,8 @@ def register_agy_handlers(
             if is_processing:
                 # 转发件的原始 caption 对生成命令没有价值，只会干扰 Planner
                 run_file_task(
-                    bot, message, file_paths, workspace_in, workspace_out, caption, model
+                    bot, message, file_paths, workspace_in, workspace_out,
+                    caption, model, tg_photo,
                 )
             else:
                 default_q = (
@@ -861,7 +876,7 @@ def register_agy_handlers(
                 batch["timer"].cancel()
         _launch_file_task(
             batch["message"], batch["in"], batch["out"],
-            batch["caption"], batch["context"],
+            batch["caption"], batch["context"], batch["tg_photo"],
         )
 
     def _arm_batch_locked(uid):
@@ -981,6 +996,10 @@ def register_agy_handlers(
                     "last_file_at": time.time(),
                     "timer": None,
                     "fired": False,
+                    # Telegram 的「图片」上传会在客户端就转码成 JPEG 并缩小
+                    # 尺寸，我们拿到的从来不是原图。处理这类输入时要如实告知，
+                    # 否则用户只会看到"我发的 png 怎么变成又小又糊的 jpg"。
+                    "tg_photo": False,
                 }
                 file_batches[uid] = batch
                 # 文本先到的情形（转发+评论：评论先发、内容后发）：
@@ -989,6 +1008,11 @@ def register_agy_handlers(
                 if absorbed:
                     batch["caption"] = absorbed
                     logger.info(f"文件批次吸收了刚到达的文本作为指令: {absorbed!r}")
+
+            # preferred_name 为空只可能来自 handle_photo：handle_any_file 拿不到
+            # 文件名时也会兜底成 file_<ts>.<ext>，绝不会传空
+            if preferred_name is None:
+                batch["tg_photo"] = True
 
             if caption:
                 batch["caption"] = caption
@@ -1008,7 +1032,7 @@ def register_agy_handlers(
             threading.Thread(
                 target=_launch_file_task,
                 args=(stale["message"], stale["in"], stale["out"],
-                      stale["caption"], stale["context"]),
+                      stale["caption"], stale["context"], stale["tg_photo"]),
             ).start()
 
         def finish_download(blob):
