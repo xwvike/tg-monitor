@@ -839,6 +839,93 @@ def test_plan_prompt(s):
     s.truthy("重规划带错误回喂", "boom" in repair and "执行失败" in repair)
 
 
+def _make_clip(path, pattern, width=1920, height=1080, seconds=2, rate=30):
+    """造一段真实视频。pattern 决定画面复杂度，也就决定源 bpp。
+
+    素材要落在离档位阈值足够远的地方：贴着阈值造出来的样本换台机器、
+    换个 ffmpeg 版本就会翻档，那样的测试是在守护巧合而不是行为。
+    """
+    src = ["-f", "lavfi", "-i"]
+    if pattern == "flat":
+        # 大片纯色：屏幕录制那一类，h264 压得极狠（实测 bpp ≈ 0.00006）
+        src += [f"color=c=white:size={width}x{height}:rate={rate}"]
+    else:
+        # 全屏渐变叠满噪点：GIF 最不擅长的那一类（实测 bpp ≈ 0.26）
+        src += [f"mandelbrot=size={width}x{height}:rate={rate}",
+                "-vf", "noise=alls=20:allf=t"]
+    res = subprocess.run(
+        ["ffmpeg", "-v", "error"] + src
+        + ["-t", str(seconds), "-pix_fmt", "yuv420p", "-y", path],
+        capture_output=True, timeout=120,
+    )
+    return res.returncode == 0 and os.path.getsize(path) > 0
+
+
+def test_gif_param_suggestion(s):
+    """GIF 宽度必须按源素材复杂度决定，而不是写死一个常数。
+
+    旧菜谱写死 720：2940 宽的 Retina 录屏被压到 24.5% 宽，文字区 SSIM 仅 0.916
+    （同素材 1470 宽为 0.970）。但也不能反过来一律放大 —— 实测同为 1440 宽、
+    同为 2940x1912 的源，屏幕录制 6s 只有 1.8 MB，全屏渐变 10s 却是 39 MB。
+    """
+    if not _has("ffmpeg") or not _has("ffprobe"):
+        s.section("GIF 参数建议（跳过：未安装 ffmpeg）")
+        return
+
+    work = tempfile.mkdtemp()
+    try:
+        flat = os.path.join(work, "flat.mp4")
+        busy = os.path.join(work, "busy.mp4")
+        if not (_make_clip(flat, "flat") and _make_clip(busy, "busy")):
+            s.section("GIF 参数建议（跳过：素材生成失败）")
+            return
+
+        s.section("复杂度探针分得开两类素材")
+        bpp_flat = fp.source_bits_per_pixel(flat)
+        bpp_busy = fp.source_bits_per_pixel(busy)
+        s.truthy("纯色素材 bpp 落在纯色档", bpp_flat < fp.GIF_FLAT_CONTENT_BPP)
+        s.truthy("高熵素材 bpp 明显更高", bpp_busy > bpp_flat * 2)
+
+        s.section("纯色/界面类 → 放宽宽度并关掉抖动")
+        hint = fp.suggest_gif_params(flat)
+        s.check("宽度放宽到 1440（旧实现一律 720）", hint["width"], 1440)
+        s.check("关闭抖动", hint["dither"], "none")
+
+        s.section("高熵素材 → 维持 720 并保留 bayer 抖动")
+        # 这一档绝不能跟着放宽：实测同为 1440 宽，屏幕录制 6s 是 1.8 MB，
+        # 全屏渐变 10s 却是 39 MB
+        hint = fp.suggest_gif_params(busy)
+        s.check("宽度回落到 720", hint["width"], 720)
+        s.check("保留 bayer", hint["dither"], "bayer:bayer_scale=5")
+
+        s.section("绝不放大")
+        narrow = os.path.join(work, "narrow.mp4")
+        if _make_clip(narrow, "flat", width=320, height=240):
+            s.check("源宽 320 时建议仍是 320",
+                    fp.suggest_gif_params(narrow)["width"], 320)
+
+        s.section("建议注入 Planner prompt")
+        prompt = fp.build_plan_prompt([flat], "/abs/out", "转gif")
+        s.truthy("含建议块", "本次 GIF 参数建议" in prompt)
+        s.truthy("给出了具体 scale", "scale=1440:-1" in prompt)
+        s.truthy("给出了具体 dither", "dither=none" in prompt)
+        s.truthy("声明了优先级高于手册默认值", "以它为准" in prompt)
+
+        s.section("非转 GIF 任务不注入")
+        other = fp.build_plan_prompt(["/abs/in/src.jpg"], "/abs/out", "压缩一下")
+        s.check("图片压缩任务无建议块", "本次 GIF 参数建议" in other, False)
+
+        s.section("探针失败不得中断规划")
+        broken = os.path.join(work, "broken.mp4")
+        with open(broken, "wb") as fh:
+            fh.write(b"not a video")
+        s.check("坏文件返回 None", fp.suggest_gif_params(broken), None)
+        ok_prompt = fp.build_plan_prompt([broken], "/abs/out", "转gif")
+        s.truthy("prompt 仍然生成", fp.INTERNAL_MARKER in ok_prompt)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_orchestration(s):
     if not (_has("convert") or _has("magick")):
         s.section("编排循环（跳过：未安装 ImageMagick）")
@@ -912,6 +999,7 @@ SUITES = [
     ("Office 转换菜谱", test_office_convert_recipe),
     ("文本产物内联", test_inline_text_products),
     ("GIF 产物投递", test_gif_product_delivery),
+    ("GIF 参数建议", test_gif_param_suggestion),
     ("压缩菜谱要点", test_video_compression_recipe_params),
     ("码率探针", test_probe_reports_bitrate),
     ("剪辑菜谱要点", test_video_trim_recipe_params),

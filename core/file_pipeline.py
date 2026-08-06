@@ -531,6 +531,117 @@ def _extract_commands(output):
     return None
 
 
+# GIF 宽度不能预设成一个常数。GIF 无帧间压缩，体积几乎只由「输出像素数 ×
+# 画面复杂度」决定，而复杂度在真实素材间相差极大 —— 实测同为 2940x1912、
+# 同为 1440 宽输出，屏幕录制 6s 只有 1.8 MB，全屏渐变 10s 却是 39 MB。
+#
+# 源视频的 h264 每像素字节数（bpp）是免费拿得到的复杂度探针：它衡量的正是
+# 时空冗余，也正是驱动 GIF 体积的同一件事。实测锚点：
+#
+#   bpp 0.0046  屏幕录制（Retina 2940x1912）  1440 宽 / 6s  →  1.8 MB
+#   bpp 0.0201  全屏渐变（mandelbrot）        1440 宽 / 10s →   39 MB
+#                                             720 宽 / 10s  →   12 MB
+#   bpp 0.0683  纯噪声                         720 宽 / 10s  →   17 MB
+#
+# 因此分档而不是套公式：只有两端有实测锚点，中间档是两者之间的插值，
+# 没有独立实测支撑。高 bpp 档沿用原来的 720，保证不会比改动前更糟。
+GIF_WIDTH_TIERS = (
+    (0.008, 1440),   # 屏幕录制 / 界面 / 动画：大片纯色，放大到 1440 也很小
+    (0.02, 960),     # 一般实拍（插值档，无独立锚点）
+    (float("inf"), 720),  # 全屏运动 / 高熵：维持原默认，不加码
+)
+# 抖动同样由这个信号决定，两端都实测过：屏幕内容是纯色块 + 锐利边缘，
+# 抖动只是加噪点而 LZW 压不掉 —— 实测 1470 宽下 dither=none 比
+# bayer:bayer_scale=5 体积相同而文字区 SSIM 更高（0.9723 vs 0.9702）。
+# 渐变/实拍素材上结论相反，bayer_scale=5 明显优于关闭抖动（会出色带）。
+GIF_FLAT_CONTENT_BPP = 0.008
+
+
+def source_bits_per_pixel(path):
+    """源视频的 h264 每像素字节数。探针失败返回 None（调用方据此不给建议）。"""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", path],
+            capture_output=True, text=True, timeout=25,
+        )
+        if res.returncode != 0:
+            return None
+        data = json.loads(res.stdout)
+        v = next((s for s in data.get("streams", [])
+                  if s.get("codec_type") == "video"), None)
+        if not v or not v.get("width") or not v.get("height"):
+            return None
+        dur = float(data.get("format", {}).get("duration")
+                    or v.get("duration") or 0)
+        num, _, den = (v.get("avg_frame_rate") or "0/1").partition("/")
+        fps = float(num) / float(den or 1) if float(den or 1) else 0
+        frames = dur * fps
+        if frames <= 0:
+            return None
+        size = os.path.getsize(path)
+        return size / (int(v["width"]) * int(v["height"]) * frames)
+    except Exception as e:
+        logger.warning(f"探测源复杂度失败 {os.path.basename(path)}: {e}")
+        return None
+
+
+def suggest_gif_params(path):
+    """按源复杂度给出 GIF 的建议宽度与抖动方式。无法判断时返回 None。
+
+    这是"确定的事交给代码"的一例：宽度该多少是可以从元数据算出来的，
+    交给 Planner 凭感觉挑只会挑出一个常数 —— 旧菜谱写死 720，于是
+    2940 宽的 Retina 录屏被压到 24.5% 宽，文字必糊（文字区 SSIM 0.916，
+    同素材 1470 宽为 0.970）。
+    """
+    bpp = source_bits_per_pixel(path)
+    if bpp is None:
+        return None
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        src_width = int((res.stdout or "").strip().split(",")[0])
+    except Exception:
+        return None
+
+    cap = next(w for threshold, w in GIF_WIDTH_TIERS if bpp < threshold)
+    return {
+        "bpp": bpp,
+        "src_width": src_width,
+        # 绝不放大：源比建议值还窄时沿用源宽
+        "width": min(src_width, cap),
+        "dither": "none" if bpp < GIF_FLAT_CONTENT_BPP else "bayer:bayer_scale=5",
+    }
+
+
+def _gif_hint_block(file_paths, recipe_names):
+    """命中转 GIF 手册时，把代码算出的宽度/抖动建议附在 prompt 里。"""
+    if "video_to_gif.md" not in recipe_names:
+        return ""
+    lines = []
+    for p in file_paths:
+        if os.path.splitext(p)[1].lower() not in VIDEO_EXTS:
+            continue
+        hint = suggest_gif_params(p)
+        if not hint:
+            continue
+        lines.append(
+            f"  - {os.path.basename(p)}: 建议 scale={hint['width']}:-1、"
+            f"dither={hint['dither']}"
+            f"（源宽 {hint['src_width']}，实测复杂度 bpp={hint['bpp']:.4f}）"
+        )
+    if not lines:
+        return ""
+    return (
+        "\n## 本次 GIF 参数建议（由代码按源视频实测复杂度推算，优先采用）\n"
+        + "\n".join(lines)
+        + "\n手册里的默认宽度是通用值；上面这行是针对本次素材算出来的，冲突时以它为准。\n"
+    )
+
+
 def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
     metadata = "\n".join(f"  - {probe_file(p)}" for p in file_paths)
     path_list = "\n".join(f"  - {p}" for p in file_paths)
@@ -555,7 +666,8 @@ def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
         "## 可用工具链\n"
         f"{load_toolchain()}\n\n"
         "## 相关标准作业手册\n"
-        f"{recipe_block}\n\n"
+        f"{recipe_block}\n"
+        f"{_gif_hint_block(file_paths, [name for name, _ in recipes])}\n"
         "## 硬性约束\n"
         f"1. 所有产物必须写入输出目录：{workspace_out}\n"
         "2. 命令中**所有**输入与输出路径必须是绝对路径。手册示例里的 "

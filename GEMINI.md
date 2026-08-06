@@ -126,12 +126,33 @@ Telegram 会**按文件内容嗅探并在服务端重编码**，与你调用哪�
 1. 去 `workspace/archive/` 找那次任务的目录（`run.json` 里有用户原话与命令原文）。
 2. 拿 `in/` 的原文件和 `out/` 的产物**实测**：`ffprobe` 比分辨率/帧率，
    `ffmpeg -lavfi ssim` 比画质，`ls -l` 比体积。
-3. 只在有测量结果支撑时才改 `config/file_recipes/*.md`，并把测得的数字写进菜谱注释。
+3. 只在有测量结果支撑时才改 `config/file_recipes/*.md`。**数字写进提交记录和本节，
+   菜谱里只留结论** —— 菜谱会被整段内联进 Planner 的 prompt，数据表既烧 token
+   又稀释指令（`tests/test_toolchain_doc.py::test_recipes_stay_concise` 守护篇幅）。
 
 留痕不在时（`TG_ARCHIVE_ENABLED=0` 或那次早于配额期限）就用同类素材复现一遍，
 **不要跳过测量直接改参数** —— 那正是把 `bayer_scale` 从 5 改成 3 这类"改了个寂寞
-甚至改坏"的来源。已实测的结论：`bayer_scale` 5 > 3 > 1（SSIM，渐变与细节素材皆然），
-`palettegen` 的 `stats_mode` 默认就是 `full`，显式写它是空操作。
+甚至改坏"的来源。
+
+已实测的 GIF 结论（源均 2940x1912，fps=12，max_colors=128）：
+
+| 素材 | 源 bpp | 输出 | 体积 | 文字区 SSIM |
+|---|---|---|---|---|
+| 屏幕录制 | 0.0046 | 720 宽 / 6s | 598 KB | 0.916 |
+| 屏幕录制 | 0.0046 | 1470 宽 / 6s | 1.8 MB | **0.970** |
+| 屏幕录制 | 0.0046 | 2940 宽 / 6s | 6.1 MB | 0.990 |
+| 全屏渐变 | 0.0201 | 720 宽 / 10s | 12 MB | — |
+| 全屏渐变 | 0.0201 | 1440 宽 / 10s | **39 MB** | — |
+| 纯噪声 | 0.0683 | 720 宽 / 10s | 17 MB | — |
+
+- **宽度必须按内容分档**，不能是常数：同为 1440 宽，屏幕录制与渐变素材差 20 倍以上。
+  源 h264 的每像素字节数（bpp）是免费的复杂度探针，`suggest_gif_params()` 据此
+  给出宽度与抖动并注入 prompt。
+- **抖动分内容**：屏幕录制 `dither=none`（1470 宽下体积相同而文字区 SSIM
+  0.9723 > bayer 的 0.9702）；渐变/实拍仍用 `bayer:bayer_scale=5`（5 > 3 > 1）。
+  任何内容都别用 `sierra2_4a`（体积翻三倍，画质差异可忽略）。
+- `max_colors` 128 → 256 只换来 +0.0007 SSIM，体积却多 20%，不值。
+- `palettegen` 的 `stats_mode` 默认就是 `full`，显式写它是空操作。
 
 > `core/run_archive.py` 负责留痕与配额，`tests/test_run_archive.py` 守护它。
 > 归档目录不受启动清扫影响；回收只按 `.env` 的容量/天数配额进行。

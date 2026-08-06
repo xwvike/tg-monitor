@@ -147,17 +147,26 @@ def test_gif_recipe_params(s):
     gens = [ln for ln in lines if "palettegen" in ln]
     s.truthy("存在 paletteuse 命令", len(uses) > 0)
     s.truthy("存在 palettegen 命令", len(gens) > 0)
-    s.check("每条 paletteuse 启用 bayer 抖动",
-            [ln for ln in uses if "dither=bayer" not in ln], [])
+    # 抖动方式按内容分档，命令里因此是占位符而非常量：屏幕录制关掉抖动
+    # 既更小又更清楚，渐变素材关掉则会出色带。写死任何一个都会毁掉另一类。
+    s.check("每条 paletteuse 都指定了抖动",
+            [ln for ln in uses if "dither=" not in ln], [])
+    s.check("不得写死单一抖动方式",
+            [ln for ln in uses if "dither=bayer" in ln or "dither=none" in ln], [])
     s.check("每条 palettegen 限制了色数",
             [ln for ln in gens if "max_colors=" not in ln], [])
     s.check("未使用实测更差的 stats_mode=diff", "stats_mode=diff" in commands, False)
+    s.check("未使用体积翻三倍的 sierra2_4a", "sierra2_4a" in commands, False)
 
     s.section("宽度策略")
+    # 宽度同样按源复杂度分档，由 suggest_gif_params() 算出后注入 prompt。
+    # 旧实现在命令里写死 720：2940 宽的高分屏录屏被压到 24.5%，文字全糊。
     scales = re.findall(r"scale=(\d+):", commands)
-    s.truthy("命令中指定了宽度", len(scales) > 0)
-    s.check("默认宽度不超过 720", sorted({w for w in scales if int(w) > 720}), [])
-    # 体积与内容强相关（实测差 21 倍），按时长硬套宽度对静态素材是无谓降质
+    s.check("命令里不写死宽度", scales, [])
+    s.truthy("命令用宽度占位符", "scale=<宽度>:" in commands)
+    s.truthy("菜谱要求优先采用代码给出的建议", "本次 GIF 参数建议" in body)
+    s.truthy("两档策略都写明了", "1440" in body and "720" in body)
+    # 体积与内容强相关（实测差 20 倍以上），按时长硬套宽度对静态素材是无谓降质
     s.check("未按时长预设宽度表", "输入时长" in body, False)
 
     s.section("palettegen 与 paletteuse 的 fps/scale 必须成对一致")
