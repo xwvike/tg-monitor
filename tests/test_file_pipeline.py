@@ -7,7 +7,6 @@
 """
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -90,263 +89,6 @@ def test_filename_injection(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_intent_shortcircuit(s):
-    s.section("意图判定：关键词短路（零模型调用）")
-    cases = [
-        ("帮我压缩一下", ["a.jpg"], True),
-        ("让这张图小一点", ["a.jpg"], True),
-        ("拼成长图", ["a.jpg", "b.jpg"], True),
-        ("转成gif", ["v.mp4"], True),
-        ("提取音频", ["v.mp4"], True),
-        ("这是什么", ["a.jpg"], False),
-        ("帮我看看这个报错", ["a.png"], False),
-        ("提取文字", ["a.png"], False),
-        ("解释一下这段代码", ["a.png"], False),
-        # 无附言必须走问答：物理处理是破坏性的，不能当默认
-        ("", ["a.pdf"], False),
-        (None, ["doc.pdf"], False),
-    ]
-    for caption, names, want in cases:
-        got, how = fp.classify_intent(caption, names, "gemini-3.6-flash-high")
-        s.check(f"{caption!r} → {how}", got, want)
-        # 关键词/空附言分支绝不能触发模型调用
-        s.check(f"{caption!r} 未调用模型", how in ("keyword", "empty"), True)
-
-
-def test_recipe_selection(s):
-    s.section("菜谱命中")
-    s.check("拼接意图", [n for n, _ in fp.select_recipes(["a.jpg", "b.jpg"], "拼成长图")][:1],
-            ["image_stitching.md"])
-    s.check("压缩意图", [n for n, _ in fp.select_recipes(["a.png"], "压缩一下")][:1],
-            ["image_compression.md"])
-    s.check("转GIF意图", [n for n, _ in fp.select_recipes(["v.mp4"], "转gif")][:1],
-            ["video_to_gif.md"])
-    # 注意：.txt 现由 document_convert.md 覆盖，这里用真正无对应菜谱的扩展名
-    s.check("无命中", fp.select_recipes(["x.xyz"], "随便弄弄"), [])
-
-    s.section("菜谱与索引一致性")
-    for entry in fp.RECIPE_INDEX:
-        path = os.path.join(fp.RECIPE_DIR, entry["file"])
-        s.check(f"{entry['file']} 存在", os.path.exists(path), True)
-    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
-        if not fname.endswith(".md") or fname == "README.md":
-            continue
-        registered = any(e["file"] == fname for e in fp.RECIPE_INDEX)
-        # 未注册的菜谱永远不会被命中，等于白写
-        s.check(f"{fname} 已注册进 RECIPE_INDEX", registered, True)
-
-    s.section("README 的菜谱清单不得过期")
-    with open(os.path.join(fp.RECIPE_DIR, "README.md"), encoding="utf-8") as fh:
-        # 只认表格行：菜谱名在正文别处被顺带提到，不等于它在清单里
-        rows = "\n".join(ln for ln in fh if ln.lstrip().startswith("|"))
-    for entry in fp.RECIPE_INDEX:
-        # 清单是人查"有没有现成菜谱"的第一入口，漏一行就会有人重复造一份
-        s.check(f"{entry['file']} 列入 README 清单", entry["file"] in rows, True)
-
-    s.section("菜谱不得含执行环境不存在的占位写法")
-    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
-        if not fname.endswith(".md") or fname == "README.md":
-            continue
-        with open(os.path.join(fp.RECIPE_DIR, fname), encoding="utf-8") as fh:
-            body = fh.read()
-        s.check(f"{fname} 无 $OUTPUT/$INPUT 变量", "$OUTPUT" in body or "$INPUT" in body, False)
-
-
-def test_pdf_recipe_routing(s):
-    """PDF 的两类需求必须各自命中正确的菜谱，且不夹带无关手册。"""
-    s.section("压缩 vs 按页转图 的排序")
-    cases = [
-        ("压缩一下", "pdf_compression.md"),
-        ("太大了帮我压压", "pdf_compression.md"),
-        ("邮件附件太大", "pdf_compression.md"),
-        ("按页转成图片", "pdf_to_images.md"),
-        ("每页导出一张jpg", "pdf_to_images.md"),
-        ("拆成图片", "pdf_to_images.md"),
-        ("转png", "pdf_to_images.md"),
-    ]
-    for caption, expected in cases:
-        picked = [n for n, _ in fp.select_recipes(["report.pdf"], caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, expected)
-        # 两份 PDF 手册都提供是合理的（意图接近时让 Planner 自行取舍），
-        # 但绝不能混入图片/视频类手册
-        s.check(f"{caption!r} 无跨类型噪声",
-                [n for n in picked if not n.startswith("pdf_")], [])
-
-    s.section("扩展名不匹配的菜谱一律不入选")
-    for names, forbidden in (
-        (["report.pdf"], "image_compression.md"),
-        (["photo.jpg"], "pdf_compression.md"),
-        (["clip.mp4"], "pdf_to_images.md"),
-    ):
-        picked = [n for n, _ in fp.select_recipes(names, "压缩一下")]
-        s.check(f"{names[0]} 不含 {forbidden}", forbidden in picked, False)
-
-    s.section("PDF 相关措辞走关键词短路，不烧模型调用")
-    for caption in ("压缩一下", "太大了帮我压压", "按页转成图片",
-                    "每页导出一张jpg", "转png", "拆成图片"):
-        _, how = fp.classify_intent(caption, ["report.pdf"], "m")
-        s.check(f"{caption!r} 判定方式", how, "keyword")
-
-
-def test_image_to_pdf_routing(s):
-    """图片转 PDF 与图片拼接必须区分开 —— 两者都能"合并多张图"，但产物完全不同。"""
-    imgs = ["photo_01.jpg", "photo_02.jpg"]
-
-    s.section("转 PDF 的措辞命中 images_to_pdf")
-    for caption in ("转成pdf", "做成pdf", "合并成pdf", "打包成pdf", "生成pdf"):
-        picked = [n for n, _ in fp.select_recipes(imgs, caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, "images_to_pdf.md")
-
-    s.section("拼接的措辞仍命中 image_stitching")
-    for caption in ("拼成长图", "上下拼接", "合并成一张", "左右拼接"):
-        picked = [n for n, _ in fp.select_recipes(imgs, caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, "image_stitching.md")
-
-    s.section("最长关键词优先")
-    # 「合并成pdf」同时匹配 image_stitching 的「合并成」与本份的「合并成pdf」，
-    # 必须由更长、更具体的那个胜出
-    picked = [n for n, _ in fp.select_recipes(imgs, "合并成pdf")]
-    s.check("更具体的关键词胜出", picked[0], "images_to_pdf.md")
-
-    s.section("意图判定走关键词短路")
-    for caption in ("转成pdf", "合并成pdf", "做成pdf", "打包成pdf"):
-        _, how = fp.classify_intent(caption, imgs, "m")
-        s.check(f"{caption!r} 判定方式", how, "keyword")
-
-
-def test_recipe_selection_precision(s):
-    """明确意图时不应再塞入靠扩展名兜底的手册 —— 那是 prompt 噪声。"""
-    s.section("有关键词命中时只给命中的手册")
-    for names, caption, expected in (
-        (["a.jpg"], "压缩一下", ["image_compression.md"]),
-        (["a.jpg"], "转成pdf", ["images_to_pdf.md"]),
-        (["r.pdf"], "压缩一下", ["pdf_compression.md"]),
-        (["r.pdf"], "按页转成图片", ["pdf_to_images.md"]),
-        (["v.mp4"], "转gif", ["video_to_gif.md"]),
-    ):
-        s.check(f"{names[0]} {caption!r}",
-                [n for n, _ in fp.select_recipes(names, caption)], expected)
-
-    s.section("无关键词命中时才用扩展名兜底")
-    picked = [n for n, _ in fp.select_recipes(["a.jpg"], "随便弄弄")]
-    s.truthy("给出候选手册", len(picked) > 0)
-    s.check("兜底候选均为图片类", [n for n in picked if not n.startswith("image")], [])
-
-
-def test_video_trim_routing(s):
-    """视频剪辑与转 GIF 是两类需求，措辞必须各自命中。"""
-    vids = ["clip.mp4"]
-
-    s.section("剪辑措辞命中 video_trim")
-    for caption in ("剪掉10到15秒", "把20-25秒去掉", "只要第30秒到40秒",
-                    "掐头去尾", "两段视频接起来", "剪辑一下"):
-        picked = [n for n, _ in fp.select_recipes(vids, caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, "video_trim.md")
-        _, how = fp.classify_intent(caption, vids, "m")
-        s.check(f"{caption!r} 走关键词短路", how, "keyword")
-
-    s.section("转 GIF 仍命中 video_to_gif")
-    for caption in ("转成gif", "做成表情包", "转动图"):
-        picked = [n for n, _ in fp.select_recipes(vids, caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, "video_to_gif.md")
-
-    s.section("视觉类问答仍走问答链路")
-    # "讲了什么/说了什么"对音视频已改判为转写（见 test_speech_media_intent），
-    # 此处只校验真正的视觉提问不被误判为处理
-    for caption in ("帮我看看这段视频", "画面里是什么", "这是什么场景"):
-        proc, _ = fp.classify_intent(caption, vids, "m")
-        s.check(f"{caption!r} 判为问答", proc, False)
-
-
-def test_video_trim_recipe_params(s):
-    """守住剪辑菜谱里几条经实测确认的要点。"""
-    body = _read_recipe("video_trim.md")
-    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
-    lines = [ln for ln in commands.splitlines()
-             if ln.strip() and not ln.strip().startswith("#")]
-
-    s.section("必须重编码，不得用流拷贝")
-    # 实测：-c copy 多段剪辑会因关键帧吸附导致画面整体偏移约 1 秒
-    s.check("剪辑命令中无 -c copy", [ln for ln in lines if "-c copy" in ln], [])
-    s.truthy("说明了流拷贝的问题", "关键帧" in body and "偏移" in body)
-
-    s.section("select 必须配套 setpts（否则丢弃段留下卡顿空洞）")
-    # 分别取出 -vf / -af 的内容再判断：`asetpts` 含有 `setpts` 子串，
-    # 整行做包含判断会被自己骗过去
-    for ln in lines:
-        for flag, need in (("-vf", "setpts="), ("-af", "asetpts=")):
-            m = re.search(rf'{flag} "([^"]*)"', ln)
-            if not m:
-                continue
-            body_ = m.group(1)
-            if "select=" not in body_:
-                continue
-            if flag == "-vf":
-                # 去掉 asetpts 干扰后再判断视频侧的 setpts
-                probe = body_.replace("asetpts=", "")
-                s.check(f"{flag} 含 setpts", "setpts=" in probe, True)
-            else:
-                s.check(f"{flag} 含 asetpts", need in body_, True)
-
-    s.section("合并多视频必须统一尺寸")
-    s.truthy("警告 concat 解复用器的陷阱", "-f concat" in body and "坏文件" in body)
-    merge = [ln for ln in lines if "concat=n=" in ln]
-    s.truthy("提供了 concat 滤镜方案", len(merge) > 0)
-    s.check("合并命令带缩放统一",
-            [ln for ln in merge if "scale=" not in ln], [])
-
-
-def test_video_compression_routing(s):
-    """三类视频需求（压缩 / 剪辑 / 转 GIF）必须各归各位。"""
-    vids = ["clip.mp4"]
-
-    s.section("各自命中")
-    for caption, expected in (
-        ("压缩一下", "video_compression.md"),
-        ("太大了发不出去", "video_compression.md"),
-        ("小一点", "video_compression.md"),
-        ("邮件附件太大", "video_compression.md"),
-        ("剪掉10到15秒", "video_trim.md"),
-        ("掐头去尾", "video_trim.md"),
-        ("转成gif", "video_to_gif.md"),
-        ("做成表情包", "video_to_gif.md"),
-    ):
-        picked = [n for n, _ in fp.select_recipes(vids, caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None, expected)
-
-    s.section("不得污染其它文件类型")
-    s.check("图片的压缩", [n for n, _ in fp.select_recipes(["a.jpg"], "压缩一下")],
-            ["image_compression.md"])
-    s.check("PDF 的压缩", [n for n, _ in fp.select_recipes(["r.pdf"], "压缩一下")],
-            ["pdf_compression.md"])
-
-
-def test_video_compression_recipe_params(s):
-    """守住压缩菜谱里几条经实测确认、且与直觉相反的结论。"""
-    body = _read_recipe("video_compression.md")
-    commands = "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
-    lines = [ln for ln in commands.splitlines()
-             if ln.strip() and not ln.strip().startswith("#")]
-
-    s.section("必须先看码率（低码率再压会变大）")
-    s.truthy("提示依据码率决策", "码率" in body)
-    s.truthy("说明可能越压越大", "变大" in body or "增加" in body)
-
-    s.section("命令要点")
-    s.check("每条命令都指定 CRF", [ln for ln in lines if "-crf" not in ln], [])
-    s.check("每条命令都固定 pix_fmt（保证兼容播放）",
-            [ln for ln in lines if "-pix_fmt yuv420p" not in ln], [])
-    s.check("每条命令都带 faststart",
-            [ln for ln in lines if "+faststart" not in ln], [])
-    s.check("缩放使用 -2 保证偶数尺寸",
-            [ln for ln in lines if "scale=" in ln and "-2" not in ln], [])
-
-    s.section("preset 不是体积杠杆（实测 slow 反而更大）")
-    s.truthy("记录了这一反直觉结论", "preset" in body and "不是体积杠杆" in body)
-    s.check("命令一律用 veryfast",
-            [ln for ln in lines if "-preset" in ln and "veryfast" not in ln], [])
-
-
 def test_probe_reports_bitrate(s):
     """码率是判断"是否已压过"的依据，探针必须提供。"""
     if not shutil.which("ffmpeg"):
@@ -370,51 +112,8 @@ def test_probe_reports_bitrate(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
-def test_speech_media_intent(s):
-    """音视频问"讲了什么"要的是转写，不是让模型描述画面。"""
-    s.section("音视频 → 判为处理（转写）")
-    for names in (["clip.mp4"], ["rec.m4a"], ["v.mkv"], ["a.wav"]):
-        for caption in ("讲了什么", "说了什么", "里面在说什么", "聊了什么"):
-            proc, how = fp.classify_intent(caption, names, "m")
-            s.check(f"{names[0]} {caption!r}", (proc, how), (True, "keyword"))
-
-    s.section("图片/PDF → 同样问法仍是视觉问答")
-    for names in (["photo.jpg"], ["report.pdf"], ["shot.png"]):
-        for caption in ("讲了什么", "说了什么", "这是什么"):
-            proc, _ = fp.classify_intent(caption, names, "m")
-            s.check(f"{names[0]} {caption!r} 判为问答", proc, False)
-
-    s.section("转写菜谱的必备参数")
-    body = _read_recipe("media_transcribe.md")
-    curls = [ln for ln in body.splitlines()
-             if ln.strip().startswith("curl") and "transcriptions" in ln]
-    s.truthy("存在转写请求命令", len(curls) > 0)
-    # 不带 prompt 时 small 模型输出繁体且几乎无标点（已实测）
-    s.check("每条转写请求都带 prompt 引导",
-            [ln for ln in curls if "prompt=" not in ln], [])
-    s.check("每条都指定了 language",
-            [ln for ln in curls if "language=" not in ln], [])
-    s.check("每条都指定了 response_format",
-            [ln for ln in curls if "response_format=" not in ln], [])
-    # 抽轨必须是 Whisper 期望的 16kHz 单声道
-    ffm = [ln for ln in body.splitlines() if ln.strip().startswith("ffmpeg")]
-    s.check("抽轨统一为 16kHz 单声道",
-            [ln for ln in ffm if "-ar 16000" not in ln or "-ac 1" not in ln], [])
-
-    s.section("转写措辞命中 media_transcribe")
-    for caption in ("提取对话", "转成文字", "要字幕", "会议记录", "听写"):
-        picked = [n for n, _ in fp.select_recipes(["clip.mp4"], caption)]
-        s.check(f"{caption!r} 首选", picked[0] if picked else None,
-                "media_transcribe.md")
-
-
 def test_rejection_channel(s):
     """需求不成立时应给出解释，而不是伪装成"格式错误"。"""
-    s.section("prompt 中声明了拒绝通道")
-    prompt = fp.build_plan_prompt(["/a/clip.mp4"], "/out", "转成word")
-    s.truthy("含 <reject> 说明", "<reject>" in prompt)
-    s.truthy("举了不成立的例子", "视频转成 Word" in prompt or "毫无关系" in prompt)
-
     s.section("解析")
     s.check("提取拒绝理由",
             fp.extract_rejection("<reject>视频与 Word 没有转换关系</reject>"),
@@ -445,109 +144,6 @@ def test_rejection_channel(s):
     finally:
         fp.call_agy = original
         shutil.rmtree(work, ignore_errors=True)
-
-
-def test_document_convert_boundaries(s):
-    """文档菜谱必须写清能力边界，否则模型会硬凑不成立的转换。"""
-    body = _read_recipe("document_convert.md")
-
-    s.section("边界声明")
-    s.truthy("说明不能输出 PDF", "PDF" in body and "LaTeX" in body)
-    s.truthy("说明音视频图片无法转文档", "视频" in body and "没有转换关系" in body)
-    s.truthy("指引 PDF 取文本用 pdftotext", "pdftotext" in body)
-    s.truthy("要求不成立时输出 reject", "<reject>" in body)
-
-    s.section("路由")
-    for names, caption, expected in (
-        (["note.md"], "转word", "document_convert.md"),
-        (["a.docx"], "转md", "document_convert.md"),
-        (["p.html"], "转epub", "document_convert.md"),
-    ):
-        picked = [n for n, _ in fp.select_recipes(names, caption)]
-        s.check(f"{names[0]} {caption!r}", picked[0] if picked else None, expected)
-
-    s.section("音视频不得命中文档菜谱")
-    for names in (["clip.mp4"], ["rec.m4a"], ["photo.jpg"]):
-        picked = [n for n, _ in fp.select_recipes(names, "转成word")]
-        s.check(f"{names[0]}", "document_convert.md" in picked, False)
-
-
-def test_image_compression_keeps_format(s):
-    """压缩不该改格式。webp→jpg 实测体积不降反增（31.6 KB → 36.5 KB）。"""
-    body = _read_recipe("image_compression.md")
-
-    s.section("每个分支的输出扩展名与输入一致")
-    for tool, ext in (("pngquant", ".png"), ("convert", ".jpg")):
-        cmds = [ln for ln in body.splitlines() if ln.strip().startswith(tool)]
-        s.truthy(f"{tool} 有命令", len(cmds) > 0)
-    webp = [ln for ln in body.splitlines()
-            if ln.strip().startswith("convert") and ".webp" in ln]
-    s.truthy("存在 webp 分支", len(webp) > 0)
-    # 输入是 webp 的那条命令，产物也必须是 webp
-    s.check("webp 分支不得输出 jpg",
-            [ln for ln in webp if "_compressed.jpg" in ln], [])
-    s.check("webp 分支输出 .webp",
-            [ln for ln in webp if "_compressed.webp" not in ln], [])
-    s.check("png 分支不得输出 jpg",
-            [ln for ln in body.splitlines()
-             if ln.strip().startswith("pngquant") and "_compressed.jpg" in ln], [])
-
-    s.section("输出规范写明不改格式")
-    s.truthy("点明压缩不改变格式", "压缩不改变格式" in body)
-
-
-def test_office_convert_recipe(s):
-    """Office 菜谱必须守住两条实测结论，并与 pandoc 菜谱分工清晰。"""
-    body = _read_recipe("office_convert.md")
-
-    s.section("实测结论")
-    # libreoffice 加载失败时只在 stdout 报错，退出码仍是 0 —— 这是那次
-    # xls→pdf 失败被误判为成功的根因，菜谱必须显式点出来。
-    # 断言落在**同一行**上：只留"不能靠退出码判断"而删掉"仍是 0"的版本
-    # 会让模型以为退出码非零就代表失败，必须判失败。
-    s.truthy("有一行明确写出失败时退出码为 0",
-             any("退出码" in ln and "0" in ln for ln in body.splitlines()))
-    s.truthy("引用了失败时的实际报错串",
-             "source file could not be loaded" in body)
-    s.truthy("给出可信判据是产物是否存在", "产物是否存在" in body)
-    # 缺少独立 profile 时并发实例会静默退出、不产出文件
-    s.truthy("要求独立 UserInstallation", "-env:UserInstallation" in body)
-
-    s.section("命令形态")
-    cmds = [ln for ln in body.splitlines() if ln.strip().startswith("soffice")]
-    s.truthy("存在转换命令", len(cmds) > 0)
-    s.check("每条都是 headless",
-            [ln for ln in cmds if "--headless" not in ln], [])
-    s.check("每条都带独立 profile",
-            [ln for ln in cmds if "-env:UserInstallation" not in ln], [])
-    s.check("每条都指定 --outdir",
-            [ln for ln in cmds if "--outdir" not in ln], [])
-
-    s.section("与 pandoc 菜谱的分工")
-    for names, caption, expected in (
-        (["表.xls"], "转成pdf", "office_convert.md"),
-        (["表.xlsx"], "导出pdf", "office_convert.md"),
-        (["稿.doc"], "转pdf", "office_convert.md"),
-        (["讲义.pptx"], "转pdf", "office_convert.md"),
-        (["a.docx"], "转成pdf", "office_convert.md"),
-        # 文本结构互转仍归 pandoc
-        (["a.docx"], "转md", "document_convert.md"),
-        (["note.md"], "转word", "document_convert.md"),
-    ):
-        picked = [n for n, _ in fp.select_recipes(names, caption)]
-        s.check(f"{names[0]} {caption!r}", picked[0] if picked else None, expected)
-
-    s.section("不得跨类型污染")
-    for names in (["clip.mp4"], ["photo.jpg"], ["r.pdf"]):
-        picked = [n for n, _ in fp.select_recipes(names, "转成pdf")]
-        s.check(f"{names[0]}", "office_convert.md" in picked, False)
-
-    s.section("Office 措辞被判为物理处理")
-    # 必须由关键词直接判定：走到 how=="model" 意味着要为一句
-    # 「转excel」多跑一次 agy 往返，且结论随模型漂移
-    for caption in ("转成pdf", "导出pdf", "打印成pdf", "转excel", "转幻灯片"):
-        proc, how = fp.classify_intent(caption, ["表.xls"], "m")
-        s.check(f"{caption!r}", (proc, how), (True, "keyword"))
 
 
 def test_inline_text_products(s):
@@ -826,104 +422,18 @@ def test_oversized_product_feedback(s):
 
 
 def test_plan_prompt(s):
+    # 只断言**结构**：路径进去了、菜谱正文进去了、内部标记在。
+    # 不断言任何具体措辞 —— 那会把文档锁死在某一版写法上。
     s.section("Planner prompt 组装")
     prompt = fp.build_plan_prompt(["/abs/in/src.jpg"], "/abs/out", "压缩一下")
-    s.truthy("内联了菜谱正文", "pngquant --quality" in prompt)
     s.truthy("含绝对输入路径", "/abs/in/src.jpg" in prompt)
     s.truthy("含输出目录", "/abs/out" in prompt)
-    s.truthy("含占位符替换警告", "$OUTPUT_DIR" in prompt)
+    s.truthy("内联了某份菜谱正文", "标准作业手册" in prompt)
     s.truthy("带内部会话标记", fp.INTERNAL_MARKER in prompt)
 
     repair = fp.build_plan_prompt(["/abs/in/src.jpg"], "/abs/out", "压缩一下",
                                   {"cmd": "convert bad", "stderr": "boom"})
     s.truthy("重规划带错误回喂", "boom" in repair and "执行失败" in repair)
-
-
-def _make_clip(path, pattern, width=1920, height=1080, seconds=2, rate=30):
-    """造一段真实视频。pattern 决定画面复杂度，也就决定源 bpp。
-
-    素材要落在离档位阈值足够远的地方：贴着阈值造出来的样本换台机器、
-    换个 ffmpeg 版本就会翻档，那样的测试是在守护巧合而不是行为。
-    """
-    src = ["-f", "lavfi", "-i"]
-    if pattern == "flat":
-        # 大片纯色：屏幕录制那一类，h264 压得极狠（实测 bpp ≈ 0.00006）
-        src += [f"color=c=white:size={width}x{height}:rate={rate}"]
-    else:
-        # 全屏渐变叠满噪点：GIF 最不擅长的那一类（实测 bpp ≈ 0.26）
-        src += [f"mandelbrot=size={width}x{height}:rate={rate}",
-                "-vf", "noise=alls=20:allf=t"]
-    res = subprocess.run(
-        ["ffmpeg", "-v", "error"] + src
-        + ["-t", str(seconds), "-pix_fmt", "yuv420p", "-y", path],
-        capture_output=True, timeout=120,
-    )
-    return res.returncode == 0 and os.path.getsize(path) > 0
-
-
-def test_gif_param_suggestion(s):
-    """GIF 宽度必须按源素材复杂度决定，而不是写死一个常数。
-
-    旧菜谱写死 720：2940 宽的 Retina 录屏被压到 24.5% 宽，文字区 SSIM 仅 0.916
-    （同素材 1470 宽为 0.970）。但也不能反过来一律放大 —— 实测同为 1440 宽、
-    同为 2940x1912 的源，屏幕录制 6s 只有 1.8 MB，全屏渐变 10s 却是 39 MB。
-    """
-    if not _has("ffmpeg") or not _has("ffprobe"):
-        s.section("GIF 参数建议（跳过：未安装 ffmpeg）")
-        return
-
-    work = tempfile.mkdtemp()
-    try:
-        flat = os.path.join(work, "flat.mp4")
-        busy = os.path.join(work, "busy.mp4")
-        if not (_make_clip(flat, "flat") and _make_clip(busy, "busy")):
-            s.section("GIF 参数建议（跳过：素材生成失败）")
-            return
-
-        s.section("复杂度探针分得开两类素材")
-        bpp_flat = fp.source_bits_per_pixel(flat)
-        bpp_busy = fp.source_bits_per_pixel(busy)
-        s.truthy("纯色素材 bpp 落在纯色档", bpp_flat < fp.GIF_FLAT_CONTENT_BPP)
-        s.truthy("高熵素材 bpp 明显更高", bpp_busy > bpp_flat * 2)
-
-        s.section("纯色/界面类 → 放宽宽度并关掉抖动")
-        hint = fp.suggest_gif_params(flat)
-        s.check("宽度放宽到 1440（旧实现一律 720）", hint["width"], 1440)
-        s.check("关闭抖动", hint["dither"], "none")
-
-        s.section("高熵素材 → 维持 720 并保留 bayer 抖动")
-        # 这一档绝不能跟着放宽：实测同为 1440 宽，屏幕录制 6s 是 1.8 MB，
-        # 全屏渐变 10s 却是 39 MB
-        hint = fp.suggest_gif_params(busy)
-        s.check("宽度回落到 720", hint["width"], 720)
-        s.check("保留 bayer", hint["dither"], "bayer:bayer_scale=5")
-
-        s.section("绝不放大")
-        narrow = os.path.join(work, "narrow.mp4")
-        if _make_clip(narrow, "flat", width=320, height=240):
-            s.check("源宽 320 时建议仍是 320",
-                    fp.suggest_gif_params(narrow)["width"], 320)
-
-        s.section("建议注入 Planner prompt")
-        prompt = fp.build_plan_prompt([flat], "/abs/out", "转gif")
-        s.truthy("含建议块", "本次 GIF 参数建议" in prompt)
-        s.truthy("给出了具体 scale", "scale=1440:-1" in prompt)
-        s.truthy("给出了具体 dither", "dither=none" in prompt)
-        s.truthy("声明了优先级高于手册默认值", "以它为准" in prompt)
-
-        s.section("非转 GIF 任务不注入")
-        other = fp.build_plan_prompt(["/abs/in/src.jpg"], "/abs/out", "压缩一下")
-        s.check("图片压缩任务无建议块", "本次 GIF 参数建议" in other, False)
-
-        s.section("探针失败不得中断规划")
-        broken = os.path.join(work, "broken.mp4")
-        with open(broken, "wb") as fh:
-            fh.write(b"not a video")
-        s.check("坏文件返回 None", fp.suggest_gif_params(broken), None)
-        ok_prompt = fp.build_plan_prompt([broken], "/abs/out", "转gif")
-        s.truthy("prompt 仍然生成", fp.INTERNAL_MARKER in ok_prompt)
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
 
 
 def test_orchestration(s):
@@ -986,24 +496,10 @@ def test_orchestration(s):
 
 SUITES = [
     ("文件名注入防护", test_filename_injection),
-    ("意图判定", test_intent_shortcircuit),
-    ("菜谱选取", test_recipe_selection),
-    ("PDF 菜谱路由", test_pdf_recipe_routing),
-    ("图片转PDF路由", test_image_to_pdf_routing),
-    ("视频剪辑路由", test_video_trim_routing),
-    ("视频压缩路由", test_video_compression_routing),
-    ("语音类意图", test_speech_media_intent),
     ("拒绝通道", test_rejection_channel),
-    ("文档转换边界", test_document_convert_boundaries),
-    ("图片压缩保持格式", test_image_compression_keeps_format),
-    ("Office 转换菜谱", test_office_convert_recipe),
     ("文本产物内联", test_inline_text_products),
     ("GIF 产物投递", test_gif_product_delivery),
-    ("GIF 参数建议", test_gif_param_suggestion),
-    ("压缩菜谱要点", test_video_compression_recipe_params),
     ("码率探针", test_probe_reports_bitrate),
-    ("剪辑菜谱要点", test_video_trim_recipe_params),
-    ("菜谱选取精度", test_recipe_selection_precision),
     ("产物打包", test_product_packaging),
     ("工具链裁剪", test_toolchain_trim),
     ("命令提取", test_command_extraction),

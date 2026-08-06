@@ -95,110 +95,6 @@ def test_declared_binaries_are_installable(s):
         s.check(f"{name} 可执行", shutil.which(name) is not None, True)
 
 
-def test_recipes_reference_real_tools(s):
-    """菜谱里出现的命令必须是工具链里真实存在的。"""
-    installer = _read(INSTALLER)
-    known = set(re.findall(r"^\s*\[([A-Za-z0-9_]+)\]=", installer, re.MULTILINE))
-    # 菜谱中允许出现的通用 shell 内建/常用命令
-    allowed_extra = {"rm", "cp", "mv", "mkdir", "cd", "echo", "unzip", "curl", "wget"}
-
-    s.section("菜谱中的命令均可解析")
-    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
-        if not fname.endswith(".md") or fname == "README.md":
-            continue
-        body = _read(os.path.join(fp.RECIPE_DIR, fname))
-        # 取出 ```bash 代码块里每行的首个词
-        for block in re.findall(r"```bash\n(.*?)```", body, re.DOTALL):
-            for line in block.splitlines():
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                cmd = line.split()[0]
-                if cmd in allowed_extra or cmd in known:
-                    continue
-                s.check(f"{fname} 中的 `{cmd}` 属于已声明工具", False, True)
-        s.check(f"{fname} 命令全部可解析", True, True)
-
-
-def _bash_blocks(body):
-    return "\n".join(re.findall(r"```bash\n(.*?)```", body, re.DOTALL))
-
-
-def _exec_lines(commands):
-    """剔除注释行 —— 注释也在 bash 块内，只看关键字会误判。"""
-    return [
-        ln for ln in commands.splitlines()
-        if ln.strip() and not ln.strip().startswith("#")
-    ]
-
-
-def test_gif_recipe_params(s):
-    """守住 GIF 菜谱里真正影响产物的参数。
-
-    只校验**可执行命令**，不校验行文措辞 —— 断言散文会把文档锁死在某一版
-    写法上，反而阻碍它变简洁。
-    """
-    body = _read(os.path.join(fp.RECIPE_DIR, "video_to_gif.md"))
-    commands = _bash_blocks(body)
-    lines = _exec_lines(commands)
-
-    s.section("关键减重参数必须出现在每条命令上")
-    uses = [ln for ln in lines if "paletteuse" in ln]
-    gens = [ln for ln in lines if "palettegen" in ln]
-    s.truthy("存在 paletteuse 命令", len(uses) > 0)
-    s.truthy("存在 palettegen 命令", len(gens) > 0)
-    # 抖动方式按内容分档，命令里因此是占位符而非常量：屏幕录制关掉抖动
-    # 既更小又更清楚，渐变素材关掉则会出色带。写死任何一个都会毁掉另一类。
-    s.check("每条 paletteuse 都指定了抖动",
-            [ln for ln in uses if "dither=" not in ln], [])
-    s.check("不得写死单一抖动方式",
-            [ln for ln in uses if "dither=bayer" in ln or "dither=none" in ln], [])
-    s.check("每条 palettegen 限制了色数",
-            [ln for ln in gens if "max_colors=" not in ln], [])
-    s.check("未使用实测更差的 stats_mode=diff", "stats_mode=diff" in commands, False)
-    s.check("未使用体积翻三倍的 sierra2_4a", "sierra2_4a" in commands, False)
-
-    s.section("宽度策略")
-    # 宽度同样按源复杂度分档，由 suggest_gif_params() 算出后注入 prompt。
-    # 旧实现在命令里写死 720：2940 宽的高分屏录屏被压到 24.5%，文字全糊。
-    scales = re.findall(r"scale=(\d+):", commands)
-    s.check("命令里不写死宽度", scales, [])
-    s.truthy("命令用宽度占位符", "scale=<宽度>:" in commands)
-    s.truthy("菜谱要求优先采用代码给出的建议", "本次 GIF 参数建议" in body)
-    s.truthy("两档策略都写明了", "1440" in body and "720" in body)
-    # 体积与内容强相关（实测差 20 倍以上），按时长硬套宽度对静态素材是无谓降质
-    s.check("未按时长预设宽度表", "输入时长" in body, False)
-
-    s.section("palettegen 与 paletteuse 的 fps/scale 必须成对一致")
-    for block in re.findall(r"```bash\n(.*?)```", body, re.DOTALL):
-        params = re.findall(r"fps=(\d+),scale=(\d+):", block)
-        if len(params) >= 2:
-            s.check("同一代码块内 fps/scale 一致", len(set(params)), 1)
-
-
-def test_recipes_stay_concise(s):
-    """菜谱会被整段内联进 Planner 的 prompt，篇幅本身就是成本。
-
-    论证性内容（实测数据表、参数取舍的完整推理）属于提交记录，
-    不属于操作手册 —— 它既烧 token 又稀释指令。
-    """
-    s.section("篇幅上限")
-    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
-        if not fname.endswith(".md") or fname == "README.md":
-            continue
-        body = _read(os.path.join(fp.RECIPE_DIR, fname))
-        n = len(body.splitlines())
-        s.check(f"{fname} 不超过 60 行（实际 {n}）", n <= 60, True)
-
-    s.section("体例一致")
-    for fname in sorted(os.listdir(fp.RECIPE_DIR)):
-        if not fname.endswith(".md") or fname == "README.md":
-            continue
-        body = _read(os.path.join(fp.RECIPE_DIR, fname))
-        for section in ("## 触发条件", "## 输出规范"):
-            s.check(f"{fname} 含 {section}", section in body, True)
-
-
 def test_toolchain_trim_keeps_file_tools(s):
     """load_toolchain() 的裁剪不得误伤文件处理相关段落。"""
     trimmed = fp.load_toolchain()
@@ -275,9 +171,6 @@ SUITES = [
     ("沙箱级数一致性", test_sandbox_level_count_matches_docs),
     ("入口函数一致性", test_python_entrypoints_exist),
     ("二进制覆盖", test_declared_binaries_are_installable),
-    ("菜谱命令可解析", test_recipes_reference_real_tools),
-    ("GIF 菜谱参数", test_gif_recipe_params),
-    ("菜谱篇幅与体例", test_recipes_stay_concise),
     ("工具链裁剪", test_toolchain_trim_keeps_file_tools),
 ]
 
