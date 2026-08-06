@@ -142,13 +142,6 @@ def get_brain_conversations():
     return conversations
 
 
-# 附在 GIF 上而不是单独发一条：GIF 转换是个高频功能，每次多一条系统消息就是刷屏
-GIF_AS_FILE_CAPTION = (
-    "🎞 以<b>文件</b>形式回传，这样才能保住原始尺寸与画质 —— "
-    "走内联动图的话 Telegram 会把它转成 MP4 并压到 320px 宽。"
-)
-
-
 def _send_product(bot, chat_id, reply_to, path):
     """按产物类型选择投递方式。
 
@@ -189,7 +182,6 @@ def _send_product(bot, chat_id, reply_to, path):
             bot.send_document(
                 chat_id, fh, reply_to_message_id=reply_to,
                 disable_content_type_detection=True,
-                caption=GIF_AS_FILE_CAPTION, parse_mode="HTML",
             )
         elif ext in VIDEO_EXTS:
             bot.send_chat_action(chat_id, "upload_video")

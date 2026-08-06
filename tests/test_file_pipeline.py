@@ -625,10 +625,8 @@ def test_gif_product_delivery(s):
         s.check("走 send_document 而非 send_animation", method, "document")
         s.check("关闭了服务端内容嗅探",
                 kwargs.get("disable_content_type_detection"), True)
-        s.truthy("附带了说明 caption", bool(kwargs.get("caption")))
-
-        s.section("说明文案")
-        s.truthy("点明了会被转成 MP4", "MP4" in ah.GIF_AS_FILE_CAPTION)
+        # 不带 caption：GIF 转换是高频功能，每次附一段 Telegram 内部行为说明就是刷屏
+        s.check("不附带说明文案", kwargs.get("caption"), None)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
