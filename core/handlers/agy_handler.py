@@ -206,6 +206,19 @@ TG_PHOTO_NOTICE = (
 )
 
 
+# 问答链路是**只读**的：它没有产物回传通道，AGY 又带着
+# --dangerously-skip-permissions 拿着完整 shell。不划这条线，它读到"转gif"
+# 就会真去跑 ffmpeg，把产物写进随后即被清扫的工作区，然后向用户报一个
+# 用户根本够不着的服务器路径 —— 表现为"它说做完了，可我什么也没收到"。
+QA_SCOPE_NOTICE = (
+    "\n\n【本次回答的边界】你现在处在**只读的内容解读**链路上，"
+    "这条链路没有把文件回传给用户的通道。因此：不要生成、转换、压缩或修改任何文件，"
+    "也不要向用户报告服务器上的文件路径（用户拿不到那些路径）。"
+    "如果用户的真实需求是转换/压缩/剪辑这类物理处理，请直接告诉他"
+    "「把文件重新发一次并附上这句指令」，不要自行动手。"
+)
+
+
 def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
                   caption, model, tg_photo=False):
     """驱动文件处理流水线，并用单条可编辑消息汇报进度。"""
@@ -887,16 +900,23 @@ def register_agy_handlers(
         names = [os.path.basename(p) for p in file_paths]
 
         def job():
-            is_processing, how = classify_intent(caption, names, model)
+            # 转发件把原作者的 caption 降级成了 context（见 _handle_incoming_file）：
+            # "转发别人的图 + 自己写评论"时那是对的。但用户转发时**没另写评论**时，
+            # 那句原文就是唯一的指令信号 —— 旧实现判路由时当它不存在、喂模型时又
+            # 把它给出去，于是文件被判成"问答"，AGY 却照着它真跑了 ffmpeg，
+            # 产物落在没有回传通道的链路上，用户只收到一个够不着的服务器路径。
+            # 自己写了评论则一律以评论为准，转发原文继续只当上下文。
+            instruction = caption or context
+            is_processing, how = classify_intent(instruction, names, model)
             logger.info(
                 f"意图判定 → {'物理处理' if is_processing else '视觉问答'} "
-                f"(via {how}) | caption={caption!r} | files={names}"
+                f"(via {how}) | caption={caption!r} | context={context!r} | "
+                f"files={names}"
             )
             if is_processing:
-                # 转发件的原始 caption 对生成命令没有价值，只会干扰 Planner
                 run_file_task(
                     bot, message, file_paths, workspace_in, workspace_out,
-                    caption, model, tg_photo,
+                    instruction, model, tg_photo,
                 )
             else:
                 default_q = (
@@ -907,6 +927,7 @@ def register_agy_handlers(
                 prompt = caption or default_q
                 if context:
                     prompt += f"\n\n（该文件为转发内容，原始附带说明：{context}）"
+                prompt += QA_SCOPE_NOTICE
                 execute_agy_prompt(
                     bot,
                     message,

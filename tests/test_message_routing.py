@@ -173,7 +173,7 @@ def test_file_then_text(s):
     r.dispatch_text(text(2, "这张图什么意思？"))
     time.sleep(0.3)
     s.check("合并成单次请求", len(r.launched), 1)
-    s.check("指令被认领", r.first(1), "这张图什么意思？")
+    s.truthy("指令被认领", (r.first(1) or "").startswith("这张图什么意思？"))
     s.check("分流到问答", r.first(0), "QA")
 
     s.section("后打的是处理指令")
@@ -216,7 +216,7 @@ def test_text_then_file(s):
     r.send_photo(photo(24, forwarded=True))
     time.sleep(SETTLE)
     s.check("合并成单次请求", len(r.launched), 1)
-    s.check("评论被吸收", r.first(1), "何意为？")
+    s.truthy("评论被吸收", (r.first(1) or "").startswith("何意为？"))
 
     s.section("陈旧闲聊不得被文件误吸收")
     r.reset()
@@ -244,7 +244,7 @@ def test_text_during_download(s):
     time.sleep(SETTLE + 0.5)
     r.bot.download_delay = 0.0
     s.check("只发起一次请求", len(r.launched), 1)
-    s.check("下载期间的文字被认领", r.first(1), "解释一下这张图")
+    s.truthy("下载期间的文字被认领", (r.first(1) or "").startswith("解释一下这张图"))
 
 
 def test_caption_ownership(s):
@@ -276,6 +276,54 @@ def test_caption_ownership(s):
     time.sleep(0.3)
     s.check("立即开工", len(r.launched), 1)
     s.check("指令即 caption", r.first(1), "压缩一下")
+
+    # 用户转发自己那条带「转gif」的视频、且没另写评论时，旧实现判路由时把
+    # 原 caption 当作不存在（→ 问答），却又把它塞进问答 prompt。AGY 于是照着
+    # 它真跑了 ffmpeg，可问答链路没有回传通道，用户只收到一个够不着的服务器
+    # 路径，产物随工作区被清掉 —— 表现为"它说做完了，我什么也没收到"。
+    s.section("转发件原 caption 是处理指令 → 必须真去处理，不能在问答里空转")
+    r.reset()
+    r.send_photo(photo(35, caption="转成gif", forwarded=True))
+    time.sleep(SETTLE)
+    s.check("发起了一次", len(r.launched), 1)
+    s.check("分流到物理处理", r.first(0), "PROCESS")
+    s.check("指令取自转发原文", r.first(1), "转成gif")
+
+    s.section("自己写了评论时，转发原文仍然只当上下文")
+    r.reset()
+    r.dispatch_text(text(36, "压缩一下"))
+    time.sleep(0.03)
+    r.send_photo(photo(37, caption="转成gif", forwarded=True))
+    time.sleep(SETTLE)
+    s.check("发起了一次", len(r.launched), 1)
+    s.check("指令是自己的评论", r.first(1), "压缩一下")
+
+
+def test_qa_path_declares_no_delivery(s):
+    """问答链路必须声明自己是只读的。
+
+    AGY 带 --dangerously-skip-permissions 运行，手里有完整 shell。问答链路
+    却没有产物回传通道 —— 不划这条线，它读到「转gif」就会真去转，然后向用户
+    报一个服务器路径，而那个目录随后就被清扫。
+    """
+    r = Rig()
+    s.section("问答 prompt 带上只读边界")
+    r.reset()
+    r.send_photo(photo(38, caption="这是什么", forwarded=True))
+    time.sleep(SETTLE)
+    s.check("走问答", r.first(0), "QA")
+    prompt = r.first(1) or ""
+    s.truthy("声明了没有回传通道", "没有把文件回传给用户的通道" in prompt)
+    s.truthy("禁止生成/转换文件", "不要生成、转换" in prompt)
+    s.truthy("禁止报服务器路径", "不要向用户报告服务器上的文件路径" in prompt)
+    s.truthy("给出了正确做法", "重新发一次" in prompt)
+
+    s.section("物理处理链路不该被这段边界污染")
+    r.reset()
+    r.send_photo(photo(39, caption="压缩一下"))
+    time.sleep(0.3)
+    s.check("走处理", r.first(0), "PROCESS")
+    s.check("指令里不含问答边界", ah.QA_SCOPE_NOTICE in (r.first(1) or ""), False)
 
 
 def test_handlers_respect_chat_mode(s):
@@ -516,6 +564,7 @@ SUITES = [
     ("文本先到", test_text_then_file),
     ("下载期间到达", test_text_during_download),
     ("caption 归属", test_caption_ownership),
+    ("问答链路只读", test_qa_path_declares_no_delivery),
     ("对话模式守卫", test_handlers_respect_chat_mode),
     ("落盘文件名收敛", test_ingest_sanitizes_filename),
     ("会话隔离", test_conversation_isolation),
