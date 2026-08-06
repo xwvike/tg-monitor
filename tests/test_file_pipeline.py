@@ -3,7 +3,7 @@
 文件任务转发测试 (tests/test_file_pipeline.py)
 
 流水线已经改成"原样转发给 agy，agy 自己动手"。因此这里只测
-**agy 够不着的确定性部分**（GEMINI.md 3.01）：
+**agy 够不着的确定性部分**（GEMINI.md《测什么，不测什么》）：
 
   - 文件名收敛（路径会进 agy 执行的 shell）
   - prompt 的结构（路径、输出目录、无指令时的只读约束）

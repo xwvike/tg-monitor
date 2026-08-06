@@ -7,8 +7,7 @@
 - **核心逻辑 (`core/`)**:
   - `core/bot.py`: Telegram 机器人 Layer 0 微内核 (动态时间戳版本 vYYYY.MM.DD-HHMM)
   - `core/task_engine.py`: 声明式动态任务调度引擎 (APScheduler + 语法防错 + 热加载)
-  - `core/file_pipeline.py`: **文件任务转发** —— 把文件与用户原话原样交给 agy，
-    再回收产物。不规划、不执行、不分流（细节见 README）
+  - `core/file_pipeline.py`: **文件任务转发** —— 把文件与用户原话原样交给 agy，再回收产物
   - `core/run_archive.py`: 任务留痕与配额回收
   - `core/tg_format.py`: Telegram HTML 转义与安全发送（解析失败自动降级重发）
   - `core/user_state.py`: 会话状态持久化（原子写 + 线程锁 + 损坏留档）
@@ -47,7 +46,7 @@
 
 ---
 
-## 🛡️ 自救与快照备份四大铁律 (SELF-RESCUE & BACKUP RULES)
+## 🛡️ 项目铁律 (PROJECT RULES)
 
 ### 1. 修改代码前的快照备份机制
 任何大型改动、重构或部署前，必须运行：
@@ -83,9 +82,9 @@
 
 > ⚠️ **改了行为就必须补测试**。`tests/` 是唯一能挡住"改坏了但还能跑"的闸门，
 > 且它随快照一起打包——不进 `tests/` 的验证等于没验证。
-> 但"什么算行为"有严格边界，见 3.01。
+> 但"什么算行为"有严格边界，见第 4 条《测什么，不测什么》。
 
-### 3.01 测什么，不测什么
+### 4. 测什么，不测什么
 **只测确定性管道，不测判断力，不测措辞。**
 
 可以测（不依赖任何人怎么说话，坏了就是真坏了）：
@@ -106,13 +105,7 @@
 判据一句话：**这条断言会因为"人换了个说法"或"文字改得更好了"而变红吗？
 会，就不该存在。**
 
-出效果问题时的正确做法不是补测试：从 `workspace/archive/` 取出那次的原文件
-与产物，实测，然后拿着数字讨论。
-
-> 2026-08-06 据此一次性砍掉了当时约四成的断言（预测措辞的、断言散文的、
-> 守护猜测的）。删掉的不是安全网，是自我安慰。
-
-### 3.0 Telegram 消息格式化铁律
+### 5. Telegram 消息格式化铁律
 Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命令输出、异常文本、
 进程名、容器名、RSS 正文）只要含 `<` 或 `&`，整条消息就会被 Telegram 以 400 拒收，
 且拒收往往被 `except` 吞掉只留一行日志 —— 消息**静默消失**。
@@ -125,7 +118,7 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
 > ⚠️ 严禁写 `f"<pre>{output}</pre>"` 这类裸插值。
 > `tests/test_tg_format.py` 会静态扫描 `core/` 拦截此类写法。
 
-### 3.1 部署与可迁移性
+### 6. 部署与可迁移性
 - **线上环境必须完全由 `install.sh` 产出**，禁止手工改 systemd unit。
   手工改动会让新机器上的部署与线上不一致（这个坑已经踩过一次）。
 - `./install.sh` 幂等，可反复执行以就地修复。
@@ -133,19 +126,19 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
   systemd unit 是否与脚本定义漂移、软链、免密 sudo、服务状态、沙箱四级校验。
 - 新增系统级依赖时，必须同步更新 `install.sh` 的 `TOOLCHAIN` 映射与 `config/TOOLCHAIN.md`。
 
-### 4. 声明式定时任务配置规范 (`config/tasks.yaml` & `core/task_engine.py`)
+### 7. 声明式定时任务配置规范 (`config/tasks.yaml` & `core/task_engine.py`)
 - **纯任务声明表**: `tasks.yaml` 只定义“做什么、什么时候做”，严禁在其中放置任何凭证、Token 或连接信息。通知发送模块直接从 `.env` 环境变量读取。
 - **禁用硬编码 timer**: 严禁直接新建或硬编码系统级的 `systemd timer`，统一在 `config/tasks.yaml` 中配置。
 - **任务放置规范**: 所有新增的定时任务代码或即用即弃脚本，统一存放在 `jobs/` 目录下，严禁随手丢在项目根目录。
 
-### 5. 菜单与按键四位一体同步
+### 8. 菜单与按键四位一体同步
 凡是新增 Telegram 功能或指令（例如 `/model`, `/effort`），必须同时更新以下 4 个位置：
 1. `init_commands()`: 注册到 Telegram API 的斜杠弹窗菜单中。
 2. `get_main_keyboard(user_id)`: 注册到 Reply 底部面板按钮中。
 3. `global_text_router(message)`: 在普通模式分发中挂载文本匹配。
 4. `send_welcome(message)`: 在 `/help` 欢迎词中加入功能说明。
 
-### 6. AGY AI 模型与思考深度交互规范
+### 9. AGY AI 模型与思考深度交互规范
 - `/model`: 弹窗 1-Click 选择 AI 模型 (Flash / Pro / Claude / GPT)。
 - `/effort`: 弹窗选择思考推理深度 (Low / Medium / High)。
 - `/settings`: 查阅当前会话选定的模型、思考深度及 Conversation ID。
