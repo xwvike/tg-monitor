@@ -7,6 +7,7 @@
 """
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -77,6 +78,34 @@ def test_rescue_ordering(s):
     s.check("锁定目标发生在打取证快照之前", 0 <= pos_target < pos_snap, True)
     s.truthy("还原时显式传入目标（而非依赖'最新'）",
              'restore_snapshot "$(basename "$recovery_target")"' in block)
+
+
+def test_project_dir_resolves_through_symlink(s):
+    """经软链调用时项目根必须仍解析到真实项目目录。
+
+    manage.sh 的正式入口是软链 /usr/local/bin/tg-bot。若用 $0 而非
+    readlink -f，PROJECT_DIR 会变成 /usr/local，backup / restore / rescue /
+    test 全部失效；而 status 不碰 PROJECT_DIR 仍正常，故障因此极难察觉。
+    """
+    s.section("软链入口下的项目根解析")
+    with tempfile.TemporaryDirectory() as d:
+        link = os.path.join(d, "tg-bot")
+        os.symlink(MANAGE, link)
+        # 必须真正**执行**软链：source 不会把 $0 设成被 source 的文件，
+        # 那样测的是别的东西。-x 让赋值结果直接可观测，backups 只读不写。
+        res = subprocess.run(
+            ["bash", "-x", link, "backups"],
+            capture_output=True, text=True, timeout=30, cwd="/",
+        )
+        m = re.search(r"^\+ PROJECT_DIR=(.*)$", res.stderr, re.MULTILINE)
+        s.truthy("捕获到 PROJECT_DIR 赋值", m is not None)
+        resolved = m.group(1).strip("'\"") if m else ""
+        s.check("经软链解析出的项目根", os.path.realpath(resolved),
+                os.path.realpath(PROJECT_DIR))
+        for name in ("venv", "core", "releases"):
+            s.check(f"{name}/ 在解析出的根下存在",
+                    os.path.isdir(os.path.join(resolved, name)) if resolved else False,
+                    True)
 
 
 def test_path_traversal_guard(s):
@@ -194,6 +223,7 @@ def test_maintenance_never_blocks_on_sudo(s):
 SUITES = [
     ("快照选取", test_snapshot_selection),
     ("自救顺序", test_rescue_ordering),
+    ("软链下的项目根解析", test_project_dir_resolves_through_symlink),
     ("路径穿越防护", test_path_traversal_guard),
     ("特权适配", test_privilege_adaptation),
     ("安装脚本边界", test_installer_does_not_touch_sudoers),

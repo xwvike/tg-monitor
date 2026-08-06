@@ -4,7 +4,11 @@
 # ==============================================================================
 
 # 动态获取项目根目录（脱离路径与用户名硬编码）
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# 必须先 readlink -f：本脚本的正式入口是软链 /usr/local/bin/tg-bot，
+# 直接用 $0 会把项目根解析成 /usr/local —— backup / restore / rescue / test
+# 全部指向不存在的路径，而 status 因为不碰 PROJECT_DIR 仍然正常，
+# 于是"看着还活着"的自救系统其实一条救命命令都跑不了。
+PROJECT_DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 PYTHON_BIN="$PROJECT_DIR/venv/bin/python3"
 BOT_SCRIPT="$PROJECT_DIR/core/bot.py"
 STATE_FILE="$PROJECT_DIR/config/user_states.json"

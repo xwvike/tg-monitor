@@ -142,11 +142,28 @@ def get_brain_conversations():
     return conversations
 
 
+# 附在 GIF 上而不是单独发一条：GIF 转换是个高频功能，每次多一条系统消息就是刷屏
+GIF_AS_FILE_CAPTION = (
+    "🎞 以<b>文件</b>形式回传，这样才能保住原始尺寸与画质 —— "
+    "走内联动图的话 Telegram 会把它转成 MP4 并压到 320px 宽。"
+)
+
+
 def _send_product(bot, chat_id, reply_to, path):
     """按产物类型选择投递方式。
 
     图片一律走 send_document：send_photo 会被 Telegram 二次压缩，
     那会直接抵消掉压缩/画质类任务的全部意义。
+
+    GIF 同理但更狠：Telegram 按**文件内容**嗅探，只要认出是 GIF 就在服务端
+    转成 H.264 MP4。实测 720x405 / 723 KB 的产物，无论走 send_animation
+    还是 send_document，回传的都是 `x.gif.mp4` / video/mp4 / 320x180 / 21 KB
+    —— 用户拿到的既不是 GIF，尺寸和画质也全丢了。唯一能逐字节保住原文件的
+    是 send_document + disable_content_type_detection=True（实测下载回来
+    sha256 与原文件一致）。代价是没有内联动图预览。
+
+    其余类型无需特殊处理：mp4 / png / mp3 实测经 send_video / send_document /
+    send_audio 回传后均与原文件逐字节相同。
     """
     ext = os.path.splitext(path)[1].lower()
 
@@ -168,8 +185,12 @@ def _send_product(bot, chat_id, reply_to, path):
 
     with open(path, "rb") as fh:
         if ext == ".gif":
-            bot.send_chat_action(chat_id, "upload_video")
-            bot.send_animation(chat_id, fh, reply_to_message_id=reply_to)
+            bot.send_chat_action(chat_id, "upload_document")
+            bot.send_document(
+                chat_id, fh, reply_to_message_id=reply_to,
+                disable_content_type_detection=True,
+                caption=GIF_AS_FILE_CAPTION, parse_mode="HTML",
+            )
         elif ext in VIDEO_EXTS:
             bot.send_chat_action(chat_id, "upload_video")
             bot.send_video(chat_id, fh, reply_to_message_id=reply_to)

@@ -97,6 +97,26 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
 > ⚠️ 严禁写 `f"<pre>{output}</pre>"` 这类裸插值。
 > `tests/test_tg_format.py` 会静态扫描 `core/` 拦截此类写法。
 
+### 3.02 产物回传的保真铁律
+Telegram 会**按文件内容嗅探并在服务端重编码**，与你调用哪个发送方法无关。
+文件处理类任务的全部价值就在产物本身，被重编码一次等于白干。
+
+已实测的行为（同一份 720x405 / 723 KB 的 GIF）：
+
+| 发送方式 | 用户实际收到 |
+|---|---|
+| `send_animation` | `x.gif.mp4`, video/mp4, 320x180, 21 KB |
+| `send_document` | `x.gif.mp4`, video/mp4, 320x180, 21 KB |
+| `send_document(disable_content_type_detection=True)` | 原文件，sha256 一致 |
+
+- **GIF**: 必须 `send_document` + `disable_content_type_detection=True`。
+- **图片**: 必须 `send_document`，`send_photo` 会二次压缩。
+- **mp4 / mp3**: 经 `send_video` / `send_audio` 实测逐字节保真，无需特殊处理。
+
+> ⚠️ 新增产物类型时，先实测"发出去再下载回来"的 sha256 是否一致，
+> 再决定走哪个方法 —— 返回的 `file_size` 是重编码**之后**的值，看它发现不了问题。
+> `tests/test_file_pipeline.py::test_gif_product_delivery` 守护该行为。
+
 ### 3.05 外部输入进入 shell 的铁律
 `execute_commands` 以 `shell=True` 执行 Planner 生成的命令，输入文件的**绝对路径
 会原样出现在命令中**。因此凡是来自外部的名称（Telegram 提供的 `file_name`、

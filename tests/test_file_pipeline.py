@@ -589,6 +589,50 @@ def test_inline_text_products(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_gif_product_delivery(s):
+    """GIF 必须以「关闭内容嗅探的文件」回传。
+
+    Telegram 认出 GIF 就会在服务端转成 MP4 并压掉尺寸（实测 720x405/723KB
+    → 320x180/21KB），send_animation 与普通 send_document 都挡不住，
+    只有 disable_content_type_detection=True 能保住原文件。
+    """
+    from core.handlers import agy_handler as ah
+    work = tempfile.mkdtemp()
+    try:
+        calls = []
+
+        class _Bot:
+            def send_chat_action(self, *a, **k):
+                pass
+
+            def send_animation(self, cid, fh, **k):
+                calls.append(("animation", k))
+
+            def send_video(self, cid, fh, **k):
+                calls.append(("video", k))
+
+            def send_document(self, cid, fh, **k):
+                calls.append(("document", k))
+
+        gif = os.path.join(work, "demo.gif")
+        with open(gif, "wb") as fh:
+            fh.write(b"GIF89a" + b"\0" * 32)
+        ah._send_product(_Bot(), 1, 1, gif)
+
+        s.section("投递方式")
+        s.check("只发了一次", len(calls), 1)
+        method, kwargs = calls[0]
+        s.check("走 send_document 而非 send_animation", method, "document")
+        s.check("关闭了服务端内容嗅探",
+                kwargs.get("disable_content_type_detection"), True)
+        s.truthy("附带了说明 caption", bool(kwargs.get("caption")))
+
+        s.section("说明文案")
+        s.truthy("点明了会被转成 MP4", "MP4" in ah.GIF_AS_FILE_CAPTION)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def test_product_packaging(s):
     """产物过多时自动打包 —— PDF 按页转图动辄几十张，逐个发送会刷屏。"""
     s.section("阈值行为")
@@ -869,6 +913,7 @@ SUITES = [
     ("图片压缩保持格式", test_image_compression_keeps_format),
     ("Office 转换菜谱", test_office_convert_recipe),
     ("文本产物内联", test_inline_text_products),
+    ("GIF 产物投递", test_gif_product_delivery),
     ("压缩菜谱要点", test_video_compression_recipe_params),
     ("码率探针", test_probe_reports_bitrate),
     ("剪辑菜谱要点", test_video_trim_recipe_params),
