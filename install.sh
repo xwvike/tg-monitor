@@ -222,6 +222,23 @@ if $CHECK_ONLY; then
         bad "$SYMLINK 缺失或指向错误"
     fi
 
+    # 软链指对了不代表能用：manage.sh 曾用 $0 而非 readlink -f 推导项目根，
+    # 经软链调用时解析成 /usr/local，backup/restore/rescue/test 全废，而
+    # status 照常工作所以毫无征兆。还原旧快照会把这个缺陷装回来，因此这里
+    # 必须实际执行一次软链、看它自己解析出的根，而不是只看软链指向。
+    # 先整段捕获再解析：本脚本是 set -euo pipefail，若直接把 bash -x 管进
+    # grep -m1，grep 命中即退出会给上游发 SIGPIPE，整个 --check 会从这里
+    # 静默截断（退出码 141），后面的沙箱校验压根不跑却显得一切正常。
+    if [ -L "$SYMLINK" ]; then
+        trace=$(cd / && bash -x "$SYMLINK" backups 2>&1 || true)
+        resolved=$(grep -m1 '^+ PROJECT_DIR=' <<<"$trace" | cut -d= -f2- || true)
+        if [ "$(readlink -f "${resolved:-/nonexistent}")" = "$(readlink -f "$PROJECT_ROOT")" ]; then
+            ok "tg-bot 经软链调用时项目根解析正确"
+        else
+            bad "tg-bot 经软链调用时项目根解析为 '${resolved:-空}'，自救命令将全部失效"
+        fi
+    fi
+
     case "$(runtime_privilege)" in
         root)     ok "以 root 运行，服务控制无需额外配置" ;;
         nopasswd) ok "检测到免密 sudo，服务控制走标准 systemctl 路径" ;;
