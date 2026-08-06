@@ -15,7 +15,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import file_pipeline as fp
 from tests.harness import main
 
 PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,22 +29,12 @@ def _read(path):
 
 def _declared_entrypoints(body):
     """解析形如：
-        - **路径**: `core/stt.py`
-        - **入口函数**: `transcribe_voice(ogg_path)`
+        - `core/tts.py` → `generate_telegram_voice(text, voice=...)` 说明
     返回 [(模块相对路径, 函数名), ...]
     """
-    pairs = []
-    current_path = None
-    for line in body.splitlines():
-        m = re.search(r"\*\*路径\*\*.*?`([^`]+\.py)`", line)
-        if m:
-            current_path = m.group(1)
-            continue
-        m = re.search(r"\*\*入口函数\*\*.*?`([A-Za-z_][A-Za-z0-9_]*)\s*\(", line)
-        if m and current_path:
-            pairs.append((current_path, m.group(1)))
-            current_path = None
-    return pairs
+    return re.findall(
+        r"`([A-Za-z0-9_/]+\.py)`\s*→\s*`([A-Za-z_][A-Za-z0-9_]*)\s*\(", body
+    )
 
 
 def _module_functions(path):
@@ -74,12 +63,10 @@ def test_python_entrypoints_exist(s):
 
 def test_declared_binaries_are_installable(s):
     body = _read(TOOLCHAIN_MD)
-    declared = sorted({
-        os.path.basename(p)
-        for p in re.findall(r"`(/usr/bin/[A-Za-z0-9_.-]+)`", body)
-    })
-    # 「核心命令」小节里以 `- \`cmd\` — 说明` 形式列出的工具
-    declared += re.findall(r"^\s*-\s+`([a-z0-9]+)`\s+—", body, re.MULTILINE)
+    # 「命令行工具」表格里每行的 | `cmd` | 用途 |，含 `convert` / `magick` 这种并列写法
+    declared = []
+    for row in re.findall(r"^\|\s*(`[^|]+`)\s*\|", body, re.MULTILINE):
+        declared += re.findall(r"`([a-z0-9]+)`", row)
     declared = sorted(set(declared))
 
     installer = _read(INSTALLER)
@@ -93,17 +80,6 @@ def test_declared_binaries_are_installable(s):
     s.section("install.sh 声明的二进制在本机确实可用")
     for name in sorted(covered):
         s.check(f"{name} 可执行", shutil.which(name) is not None, True)
-
-
-def test_toolchain_trim_keeps_file_tools(s):
-    """load_toolchain() 的裁剪不得误伤文件处理相关段落。"""
-    trimmed = fp.load_toolchain()
-    s.section("裁剪后仍保留文件处理能力")
-    for keyword in ("FFmpeg", "ImageMagick", "pngquant", "Pandoc", "poppler"):
-        s.truthy(f"保留 {keyword}", keyword in trimmed)
-    s.section("裁剪掉与文件处理无关的服务清单")
-    for noise in ("PostgreSQL", "qBittorrent", "MinIO", "Redis"):
-        s.check(f"已剔除 {noise}", noise in trimmed, False)
 
 
 def test_docs_reference_real_files(s):
@@ -171,7 +147,6 @@ SUITES = [
     ("沙箱级数一致性", test_sandbox_level_count_matches_docs),
     ("入口函数一致性", test_python_entrypoints_exist),
     ("二进制覆盖", test_declared_binaries_are_installable),
-    ("工具链裁剪", test_toolchain_trim_keeps_file_tools),
 ]
 
 if __name__ == "__main__":

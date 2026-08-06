@@ -30,9 +30,8 @@ from core.file_pipeline import (
     TG_UPLOAD_LIMIT_BYTES,
     VIDEO_EXTS,
     agy_env,
-    classify_intent,
     package_products,
-    plan_and_execute,
+    run_task,
     safe_filename,
 )
 from core.run_archive import archive_root, archive_run, prune
@@ -206,26 +205,13 @@ TG_PHOTO_NOTICE = (
 )
 
 
-# 问答链路是**只读**的：它没有产物回传通道，AGY 又带着
-# --dangerously-skip-permissions 拿着完整 shell。不划这条线，它读到"转gif"
-# 就会真去跑 ffmpeg，把产物写进随后即被清扫的工作区，然后向用户报一个
-# 用户根本够不着的服务器路径 —— 表现为"它说做完了，可我什么也没收到"。
-QA_SCOPE_NOTICE = (
-    "\n\n【本次回答的边界】你现在处在**只读的内容解读**链路上，"
-    "这条链路没有把文件回传给用户的通道。因此：不要生成、转换、压缩或修改任何文件，"
-    "也不要向用户报告服务器上的文件路径（用户拿不到那些路径）。"
-    "如果用户的真实需求是转换/压缩/剪辑这类物理处理，请直接告诉他"
-    "「把文件重新发一次并附上这句指令」，不要自行动手。"
-)
-
-
 def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
                   caption, model, tg_photo=False):
     """驱动文件处理流水线，并用单条可编辑消息汇报进度。"""
     chat_id = message.chat.id
     try:
         status_msg = bot.send_message(
-            chat_id, "⚙️ 正在规划处理步骤...", reply_to_message_id=message.message_id
+            chat_id, "⚙️ 已交给 AGY 处理...", reply_to_message_id=message.message_id
         )
     except Exception:
         status_msg = None
@@ -244,12 +230,22 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
             pass
 
     try:
-        ok, products, error = plan_and_execute(
+        ok, products, reply, error = run_task(
             file_paths, workspace_in, workspace_out, caption, model, on_status,
             trace=trace,
         )
 
         if ok:
+            # agy 的文字回复先发：它可能是"这就是答案"（用户只是问了个问题），
+            # 也可能是"我这么做的、参数为什么这么选"的说明。分流已经删了，
+            # 两种情况现在走同一条路 —— 有产物就连产物一起发，没产物就只发话。
+            if reply:
+                send_html(
+                    bot, chat_id,
+                    f"🤖 <b>agy：</b>\n──────────────────────\n{esc(reply)}",
+                    reply_to_message_id=message.message_id,
+                )
+
             count = len(products)
             products, packed = package_products(
                 products, workspace_out, os.path.splitext(
@@ -257,7 +253,7 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
             )
             if packed:
                 on_status(f"📦 共 {count} 个产物，已打包为压缩包回传...")
-            else:
+            elif count:
                 on_status(f"✅ 处理完成，正在回传 {count} 个文件...")
             for path in products:
                 size = os.path.getsize(path)
@@ -880,7 +876,12 @@ def register_agy_handlers(
 
     def _launch_file_task(message, workspace_in, workspace_out, caption,
                           context="", tg_photo=False):
-        """意图判定后分流：物理处理走流水线，视觉问答走主对话链路。"""
+        """把文件与用户原话原样交给 agy —— 不再分流。
+
+        以前这里按关键词表判"物理处理 vs 视觉问答"，走两条不同链路。删掉了：
+        那张表要靠猜用户会怎么说话，而"是回答还是动手"agy 看着文件和那句话
+        自己就能判断。少一次预判，就少一处猜错的机会。
+        """
         try:
             file_paths = sorted(
                 os.path.join(workspace_in, f)
@@ -897,46 +898,22 @@ def register_agy_handlers(
 
         st = get_user_state_fn(message.from_user.id)
         model = st.get("model", "gemini-3.6-flash-high")
-        names = [os.path.basename(p) for p in file_paths]
+
+        # 转发件把原作者的 caption 降级成了 context。用户自己写了评论就以评论
+        # 为准；没写时那句原文是唯一的指令信号，不能当它不存在。
+        instruction = caption or context
+        if context and caption:
+            instruction = f"{caption}\n\n（该文件为转发内容，原始附带说明：{context}）"
 
         def job():
-            # 转发件把原作者的 caption 降级成了 context（见 _handle_incoming_file）：
-            # "转发别人的图 + 自己写评论"时那是对的。但用户转发时**没另写评论**时，
-            # 那句原文就是唯一的指令信号 —— 旧实现判路由时当它不存在、喂模型时又
-            # 把它给出去，于是文件被判成"问答"，AGY 却照着它真跑了 ffmpeg，
-            # 产物落在没有回传通道的链路上，用户只收到一个够不着的服务器路径。
-            # 自己写了评论则一律以评论为准，转发原文继续只当上下文。
-            instruction = caption or context
-            is_processing, how = classify_intent(instruction, names, model)
             logger.info(
-                f"意图判定 → {'物理处理' if is_processing else '视觉问答'} "
-                f"(via {how}) | caption={caption!r} | context={context!r} | "
-                f"files={names}"
+                f"文件任务 → 交给 agy | 指令={instruction!r} | "
+                f"files={[os.path.basename(p) for p in file_paths]}"
             )
-            if is_processing:
-                run_file_task(
-                    bot, message, file_paths, workspace_in, workspace_out,
-                    instruction, model, tg_photo,
-                )
-            else:
-                default_q = (
-                    "请详细描述这些文件的内容，若包含代码或报错信息请指出并解释。"
-                    if len(file_paths) > 1
-                    else "请详细描述这个文件的内容，若包含代码或报错信息请指出并解释。"
-                )
-                prompt = caption or default_q
-                if context:
-                    prompt += f"\n\n（该文件为转发内容，原始附带说明：{context}）"
-                prompt += QA_SCOPE_NOTICE
-                execute_agy_prompt(
-                    bot,
-                    message,
-                    prompt,
-                    get_user_state_fn,
-                    save_user_states_fn,
-                    attached_files=file_paths,
-                    cleanup_dirs=[workspace_in, workspace_out],
-                )
+            run_file_task(
+                bot, message, file_paths, workspace_in, workspace_out,
+                instruction, model, tg_photo,
+            )
 
         threading.Thread(target=job).start()
 

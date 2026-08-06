@@ -31,9 +31,9 @@ graph TD
         SystemdService -->|文件批次| FilePipe["🗂️ 文件处理流水线 (core/file_pipeline.py)"]
         
         FilePipe -->|内联能力地图| Toolchain["🧰 config/TOOLCHAIN.md"]
-        FilePipe -->|按扩展名+关键词命中| Recipes["📚 config/file_recipes/"]
-        FilePipe -->|规划命令| AGYEngine
-        FilePipe -->|shell 执行 + 错误回喂| CLITools["🎬 ffmpeg / convert / pandoc / pdftotext"]
+        FilePipe -->|留痕| Archive["📁 workspace/archive/"]
+        FilePipe -->|原样转发 + 回收产物| AGYEngine
+        AGYEngine -->|自己跑命令| CLITools["🎬 ffmpeg / convert / pandoc / pdftotext"]
         
         VoiceEngine <-->|转码兜底| FFmpeg["🎬 FFmpeg"]
         VoiceEngine <-->|API 调用| HTTP_APIs["🌐 Whisper & Edge-TTS API"]
@@ -83,53 +83,46 @@ graph TD
 
 直接把文件丢给机器人并说人话即可 —— "压缩一下"、"上下拼接"、"转成 gif"、
 "这段视频讲了什么"、"剪掉 10 秒到 25 秒"、"这个 xls 转成 PDF"。
-覆盖范围见 `config/file_recipes/README.md` 的菜谱清单。
 
-- **意图分流**: 关键词短路优先判定"物理处理"还是"视觉问答"，常见措辞**零模型调用**；
-  只有真模糊时才问一次轻量模型。无附言一律走问答（非破坏性默认）。
+这一层**只做转发**：把文件和你的原话原样交给 agy，它自己动手，产物发回来。
+没有意图分流、没有菜谱、没有命令规划 —— 那些都试过，全都塌在同一件事上：
+替 agy 做判断（历代形态与塌法见 `GEMINI.md` 3.04）。
+
+```
+落盘文件 → prompt（工具说明 + 你的原话 + in/out 路径）
+        → agy（一次性调用 = 新会话，自己跑命令、自己看报错、自己重试）
+        → 扫 out/ → 回传产物 + agy 的文字回复
+```
+
 - **相册聚合**: Telegram 相册的每张图是独立消息，按 `media_group_id` 聚合成**单次任务**，
   多图拼接才成为可能。
 - **文件与文字合并**: 无论"先发图后打字"、"转发+评论"（评论先到），还是文字在**文件下载
   期间**到达，都会合并成单次请求，不会产生两条互不相干的回复。
-- **判定 + 规划两次调用**: 参数好不好取决于素材是什么，而那是判断不是算术。
-  代码负责**摆证据**（抽 3 帧、探元数据、算每像素码率），模型负责**下判断**
-  （这是屏幕录制还是实拍、文字要不要读得清、因此什么优先）。判定结论进规划调用。
-  拆成两次是必须的 —— 多模态模型一旦在规划调用里拿到图片就会开始描述画面而不动手。
-- **Planner-Executor 隔离**: 规划调用只拿到元数据、判定结论与需求，输出纯命令数组；
-  Python 负责执行。菜谱与工具链由代码按扩展名+关键词命中后**直接内联**，
-  不让模型自己去搜。菜谱写的是**权衡**（每个旋钮花什么代价、什么素材在意什么），
-  不是填空式命令模板。
-- **错误回喂重规划**: 命令失败时把**真实 stderr** 回喂给 Planner 修正，而不是丢一个返回码。
-  "命令全绿但没产物"同样视为失败。产物落错目录会被自动回收。
+- **原话原样转发**: 不做关键词分流、不改写、不加解读。是回答还是动手，agy 看着
+  文件和那句话自己判断。唯一的例外：一个字都没写时，prompt 里会加一条只读约束
+  —— 没让它干却干了，比不干更糟。
 - **按类型投递**: 视频 → 视频、音频 → 音频（实测二者原样保真）；图片与 GIF 走
   document 保真 —— send_photo 会二次压缩，而 GIF 更狠：Telegram 按文件内容嗅探，
   认出就转成 MP4 并压掉尺寸，必须 `disable_content_type_detection=True` 才拦得住。
 - **安全收敛**: 外部文件名先经 `safe_filename()` 中和 shell 元字符 —— 路径会原样进入
-  执行的命令，不收敛即构成命令注入。
-- **任务留痕**: 每次任务的输入、产物与 `run.json`（用户原话、命中的菜谱、每一轮实际
-  执行的命令）一起归档到 `workspace/archive/`，配额到了按最旧优先回收。
-  详见下方「留痕与配额」。
+  agy 执行的命令，不收敛即构成命令注入。执行方换成 agy 不会让这个风险消失。
+- **任务留痕**: 每次任务的输入、产物与 `run.json`（你的原话、agy 的回复、产物清单）
+  一起归档到 `workspace/archive/`，配额到了按最旧优先回收。详见下方「留痕与配额」。
 
 #### 责任边界速查
 
-这条线画在哪里决定了稳定性：**确定的事交给代码，不确定的事才交给模型**。
+**确定的事交给代码，需要判断的事整个交给 agy。**
 
-| 环节 | 归属 | 位置 |
-|------|------|------|
-| 文件落盘、相册聚合、文字合并 | Python | `core/handlers/agy_handler.py` |
-| 意图判定（关键词短路） | Python | `classify_intent()` |
-| 意图判定（真模糊时） | LLM | `classify_intent()` 兜底分支 |
-| 菜谱与工具链检索 | Python | `select_recipes()` / `load_toolchain()` |
-| 元数据探针 | Python | `probe_file()` |
-| **需求 → bash 命令** | **LLM** | `build_plan_prompt()` |
-| 命令执行与错误捕获 | Python | `execute_commands()` |
-| **读懂报错并修正命令** | **LLM** | 回喂重规划（`MAX_PLAN_ATTEMPTS`） |
-| 产物回收、打包与投递 | Python | `collect_outputs()` / `package_products()` / `_send_product()` |
+| 环节 | 归属 |
+|------|------|
+| 文件落盘、相册聚合、文字合并 | Python (`agy_handler.py`) |
+| 文件名收敛（防命令注入） | Python (`safe_filename()`) |
+| **看清素材、定参数、跑命令、出错重试** | **agy** |
+| 产物回收、打包与投递保真 | Python (`collect_outputs()` / `_send_product()`) |
+| 任务留痕与配额 | Python (`run_archive.py`) |
 
-Planner 拿不到实体文件是刻意的：多模态模型看见图片的第一本能是描述它，
-在处理任务里传图会让它丢掉动作指令、转而向用户解说图片内容。
-
-> 新增菜谱需同时写 `.md` 并在 `RECIPE_INDEX` 中注册，详见 `config/file_recipes/README.md`。
+> `config/TOOLCHAIN.md` 是唯一还会被内联进 prompt 的项目文档。它说的是
+> **这台机器上有什么**（客观事实），不是**该怎么用**（判断）。这条界线要守住。
 
 #### 留痕与配额 (`core/run_archive.py`)
 
@@ -141,7 +134,7 @@ Planner 拿不到实体文件是刻意的：多模态模型看见图片的第一
 workspace/archive/20260806_210050_2112_1786020522/
 ├── in/       原始输入（用户发来的文件）
 ├── out/      实际回传的产物
-└── run.json  用户原话、命中的菜谱、每一轮执行的命令与失败原因
+└── run.json  你的原话、agy 的回复、产物清单与失败原因
 ```
 
 命令在 journalctl 里也有，但和产物对不上号。两者同源才能拿来核对，

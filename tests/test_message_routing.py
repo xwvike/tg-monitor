@@ -137,15 +137,10 @@ class Rig:
         )
         self.send_photo = self.bot.handlers["handle_photo"]
 
+        # 分流已经删掉：文件任务只有 run_file_task 一个出口
         ah.run_file_task = (
             lambda b, m, files, wi, wo, cap, mo, tg_photo=False:
-            self.launched.append(("PROCESS", cap, len(files), "", tg_photo))
-        )
-        ah.execute_agy_prompt = lambda b, m, p, g, sv, attached_files=None, cleanup_dirs=None: (
-            self.launched.append(("QA", p, len(attached_files or []), p))
-        )
-        ah.classify_intent = lambda cap, names, model: (
-            any(k in (cap or "") for k in ("拼接", "压缩", "gif")), "stub"
+            self.launched.append(("TASK", cap, len(files), "", tg_photo))
         )
 
     def reset(self):
@@ -173,8 +168,8 @@ def test_file_then_text(s):
     r.dispatch_text(text(2, "这张图什么意思？"))
     time.sleep(0.3)
     s.check("合并成单次请求", len(r.launched), 1)
-    s.truthy("指令被认领", (r.first(1) or "").startswith("这张图什么意思？"))
-    s.check("分流到问答", r.first(0), "QA")
+    s.check("指令被认领", r.first(1), "这张图什么意思？")
+    s.check("走文件任务", r.first(0), "TASK")
 
     s.section("后打的是处理指令")
     r.reset()
@@ -183,7 +178,7 @@ def test_file_then_text(s):
     r.dispatch_text(text(4, "帮我压缩一下"))
     time.sleep(0.3)
     s.check("单次请求", len(r.launched), 1)
-    s.check("分流到物理处理", r.first(0), "PROCESS")
+    s.check("走文件任务", r.first(0), "TASK")
 
     s.section("一直不说话 → 窗口到点用默认问句放行")
     r.reset()
@@ -192,7 +187,7 @@ def test_file_then_text(s):
     s.check("窗口内未发出", len(r.launched), 0)
     time.sleep(SETTLE)
     s.check("窗口后自动放行", len(r.launched), 1)
-    s.check("走问答", r.first(0), "QA")
+    s.check("走文件任务", r.first(0), "TASK")
 
 
 def test_text_then_file(s):
@@ -216,7 +211,7 @@ def test_text_then_file(s):
     r.send_photo(photo(24, forwarded=True))
     time.sleep(SETTLE)
     s.check("合并成单次请求", len(r.launched), 1)
-    s.truthy("评论被吸收", (r.first(1) or "").startswith("何意为？"))
+    s.check("评论被吸收", r.first(1), "何意为？")
 
     s.section("陈旧闲聊不得被文件误吸收")
     r.reset()
@@ -244,7 +239,7 @@ def test_text_during_download(s):
     time.sleep(SETTLE + 0.5)
     r.bot.download_delay = 0.0
     s.check("只发起一次请求", len(r.launched), 1)
-    s.truthy("下载期间的文字被认领", (r.first(1) or "").startswith("解释一下这张图"))
+    s.check("下载期间的文字被认领", r.first(1), "解释一下这张图")
 
 
 def test_caption_ownership(s):
@@ -258,7 +253,8 @@ def test_caption_ownership(s):
     r.send_photo(photo(32, caption="via Eric", group="g3", forwarded=True))
     time.sleep(SETTLE)
     s.check("只发起一次请求", len(r.launched), 1)
-    s.check("指令是用户评论而非原 caption", r.first(1), "上下拼接，第一张在上面")
+    s.truthy("指令以用户评论开头", (r.first(1) or "").startswith("上下拼接，第一张在上面"))
+    s.truthy("原 caption 降级为括注而非指令", "原始附带说明：via Eric" in (r.first(1) or ""))
     s.check("两张图都在", r.first(2), 2)
 
     s.section("转发件带 caption 但用户没写评论 → 降级为上下文")
@@ -268,7 +264,7 @@ def test_caption_ownership(s):
     s.check("原 caption 未被当成指令立即开工", len(r.launched), 0)
     time.sleep(SETTLE)
     s.check("窗口后按默认问句放行", len(r.launched), 1)
-    s.truthy("原 caption 作为上下文保留", "via Eric" in (r.first(3) or ""))
+    s.check("没写评论时原 caption 即指令", r.first(1), "via Eric")
 
     s.section("非转发件的 caption 仍然是用户指令")
     r.reset()
@@ -286,7 +282,7 @@ def test_caption_ownership(s):
     r.send_photo(photo(35, caption="转成gif", forwarded=True))
     time.sleep(SETTLE)
     s.check("发起了一次", len(r.launched), 1)
-    s.check("分流到物理处理", r.first(0), "PROCESS")
+    s.check("走文件任务", r.first(0), "TASK")
     s.check("指令取自转发原文", r.first(1), "转成gif")
 
     s.section("自己写了评论时，转发原文仍然只当上下文")
@@ -296,34 +292,7 @@ def test_caption_ownership(s):
     r.send_photo(photo(37, caption="转成gif", forwarded=True))
     time.sleep(SETTLE)
     s.check("发起了一次", len(r.launched), 1)
-    s.check("指令是自己的评论", r.first(1), "压缩一下")
-
-
-def test_qa_path_declares_no_delivery(s):
-    """问答链路必须声明自己是只读的。
-
-    AGY 带 --dangerously-skip-permissions 运行，手里有完整 shell。问答链路
-    却没有产物回传通道 —— 不划这条线，它读到「转gif」就会真去转，然后向用户
-    报一个服务器路径，而那个目录随后就被清扫。
-    """
-    r = Rig()
-    s.section("问答 prompt 带上只读边界")
-    r.reset()
-    r.send_photo(photo(38, caption="这是什么", forwarded=True))
-    time.sleep(SETTLE)
-    s.check("走问答", r.first(0), "QA")
-    prompt = r.first(1) or ""
-    s.truthy("声明了没有回传通道", "没有把文件回传给用户的通道" in prompt)
-    s.truthy("禁止生成/转换文件", "不要生成、转换" in prompt)
-    s.truthy("禁止报服务器路径", "不要向用户报告服务器上的文件路径" in prompt)
-    s.truthy("给出了正确做法", "重新发一次" in prompt)
-
-    s.section("物理处理链路不该被这段边界污染")
-    r.reset()
-    r.send_photo(photo(39, caption="压缩一下"))
-    time.sleep(0.3)
-    s.check("走处理", r.first(0), "PROCESS")
-    s.check("指令里不含问答边界", ah.QA_SCOPE_NOTICE in (r.first(1) or ""), False)
+    s.truthy("指令以自己的评论开头", (r.first(1) or "").startswith("压缩一下"))
 
 
 def test_handlers_respect_chat_mode(s):
@@ -411,7 +380,7 @@ def test_ingest_sanitizes_filename(s):
 def test_conversation_isolation(s):
     s.section("内部会话不得污染 /history 与 conv_id")
     s.truthy("Planner prompt 带内部标记",
-             fp.INTERNAL_MARKER in fp.build_plan_prompt(["/a.jpg"], "/out", "压缩"))
+             fp.INTERNAL_MARKER in fp.build_task_prompt(["/a.jpg"], "/out", "压缩"))
     s.check("预览剥掉 XML 包装",
             ah._clean_preview("<USER_REQUEST>\n何意为？\n</USER_REQUEST>"
                               "\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>"),
@@ -525,14 +494,14 @@ def test_tg_photo_flag(s):
                 def send_document(self, *a, **k):
                     pass
 
-            orig_plan, orig_html = ah.plan_and_execute, ah.send_html
-            ah.plan_and_execute = lambda *a, **k: (True, [product], None)
+            orig_run, orig_html = ah.run_task, ah.send_html
+            ah.run_task = lambda *a, **k: (True, [product], "", None)
             ah.send_html = lambda b, cid, txt, **k: sent.append(txt)
             try:
                 _REAL_RUN_FILE_TASK(_Bot(), photo(90), [product], work, wout,
                                     "压缩一下", "m", flag)
             finally:
-                ah.plan_and_execute, ah.send_html = orig_plan, orig_html
+                ah.run_task, ah.send_html = orig_run, orig_html
             s.check(f"tg_photo={flag} 时发出提示的条数",
                     sum(1 for t in sent if "「<b>图片</b>」" in t), expect)
         finally:
@@ -564,7 +533,6 @@ SUITES = [
     ("文本先到", test_text_then_file),
     ("下载期间到达", test_text_during_download),
     ("caption 归属", test_caption_ownership),
-    ("问答链路只读", test_qa_path_declares_no_delivery),
     ("对话模式守卫", test_handlers_respect_chat_mode),
     ("落盘文件名收敛", test_ingest_sanitizes_filename),
     ("会话隔离", test_conversation_isolation),

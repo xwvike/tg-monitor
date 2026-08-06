@@ -196,10 +196,10 @@ def test_disabled_switch(s):
 
 
 def test_pipeline_fills_trace(s):
-    """plan_and_execute 必须把命中的菜谱与每一轮命令写进 trace。
+    """run_task 必须把"这次到底干了什么"写进 trace。
 
-    命令在 journalctl 里也有，但和产物对不上号；调参要看的正是
-    "这组参数产出了这个文件"，两者必须同源。
+    它会被写到产物旁边的 run.json —— 出效果问题时，要看的正是
+    "这句话 + 这个输入 → agy 回了什么 + 产出了什么"。
     """
     from core import file_pipeline as fp
 
@@ -211,30 +211,32 @@ def test_pipeline_fills_trace(s):
         with open(os.path.join(win, "clip.mp4"), "wb") as fh:
             fh.write(b"\0" * 16)
 
-        orig = fp.call_agy
-        fp.call_agy = lambda *a, **k: (
-            True, f'<json>["touch {wout}/clip.gif"]</json>', None
-        )
+        fake = os.path.join(root, "fake_agy")
+        with open(fake, "w", encoding="utf-8") as fh:
+            fh.write(f'#!/bin/bash\necho "已转成 GIF"\ntouch {wout}/clip.gif\n')
+        os.chmod(fake, 0o755)
+
+        orig = fp.AGY_BIN
+        fp.AGY_BIN = fake
         try:
             trace = {}
-            ok, products, _ = fp.plan_and_execute(
+            ok, products, reply, _err = fp.run_task(
                 [os.path.join(win, "clip.mp4")], win, wout, "转成gif", "m",
                 trace=trace,
             )
         finally:
-            fp.call_agy = orig
+            fp.AGY_BIN = orig
 
         s.section("trace 被填满")
         s.check("任务成功", ok, True)
-        s.check("用户原话在案", trace["caption"], "转成gif")
-        s.truthy("命中的菜谱在案", "video_to_gif.md" in trace["recipes"])
-        s.check("记录了 1 轮", len(trace["attempts"]), 1)
-        s.truthy("命令原文在案",
-                 any("clip.gif" in c for c in trace["attempts"][0]["commands"]))
-        s.check("该轮标记为成功", trace["attempts"][0]["ok"], True)
+        s.check("用户原话在案", trace["message"], "转成gif")
+        s.check("产物清单在案", trace["product_names"], ["clip.gif"])
+        s.truthy("agy 的回复在案", "已转成 GIF" in trace["reply"])
+        s.truthy("记下了 prompt 规模", trace.get("prompt_chars", 0) > 0)
 
         s.section("不传 trace 时行为不变")
         s.check("产物照常回收", len(products), 1)
+        s.truthy("回复照常返回", bool(reply))
 
 
 def test_sweep_never_touches_archive(s):

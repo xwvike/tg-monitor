@@ -1,174 +1,51 @@
-# 🧰 AGY 可用工具链清单 (Toolchain Manifest)
+# 🧰 这台机器上有什么 (Toolchain Manifest)
 
-> **本文件是 AGY 处理文件任务时的"能力地图"。**
-> 接到文件处理请求时，请先阅读此清单确认可用工具，优先使用已注册的能力，避免盲目尝试未安装的工具。
+> 这份清单会被**整段内联进任务 prompt**。它只回答"有什么"，不回答"该怎么用" ——
+> 参数怎么定、素材该怎么处理，由你看清楚素材后自己决定。
+> 清单里没有的工具就是没装，不要尝试安装。
 
----
+## 命令行工具
 
-## 🎬 音视频处理
+| 命令 | 用途 |
+|---|---|
+| `ffmpeg` | 音视频转码、转 GIF、抽音轨、裁剪拼接、加水印 |
+| `ffprobe` | 探分辨率/时长/帧率/码率/编码 —— 动手前先看清素材 |
+| `convert` / `magick` | ImageMagick：图片转换、缩放、拼接、加字 |
+| `identify` | 读图片尺寸、格式、色深 |
+| `pngquant` | PNG 有损量化压缩，通常比重编码更划算 |
+| `pandoc` | 文档互转（md / html / docx / odt / epub / rst / txt） |
+| `soffice` | LibreOffice headless：Office 文档互转与转 PDF |
+| `gs` | Ghostscript：PDF 压缩与合并 |
+| `pdftotext` | 取 PDF 文本层 |
+| `pdftoppm` | PDF 按页转图片 |
+| `pdfimages` | 抽出 PDF 内嵌的原始图片 |
+| `pdfinfo` | 读 PDF 页数与元信息 |
 
-### FFmpeg
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/ffmpeg`
-- **能力**:
-  - 视频格式互转 (mp4/mkv/avi/webm/mov)
-  - 视频转 GIF 动图
-  - 视频/音频 抽取分离
-  - 音频格式转换与重采样 (mp3/wav/ogg/flac)
-  - 图片格式转换
-  - 视频裁剪、拼接、加水印
-- **调用示例**: `ffmpeg -i INPUT [options] OUTPUT`
+标准 shell 工具（`rm` `cp` `mv` `mkdir` `unzip` `curl` 等）照常可用。
 
----
+**两个本机事实，省得你白跑一轮：**
+- `pandoc` **出不了 PDF** —— 本机没装 LaTeX 引擎，`pandoc x.md -o x.pdf` 必失败。
+  要 PDF 就先转 HTML/docx 再用 `soffice` 转。
+- `soffice` **报错时仍返回 0** —— 缺组件或文件损坏时只在 stderr 打印。
+  别只看返回码，要确认产物真的生成了。
 
-## 🎙️ 语音处理
+## 本机服务
 
-### TTS 语音合成引擎
-- **类型**: Python 模块
-- **路径**: `core/tts.py`
-- **入口函数**: `generate_telegram_voice(text, voice=...)`
-- **能力**:
-  - 中英文文本转语音
-  - 两阶段流水线: Edge-TTS API → FFmpeg OGG/Opus 转码
-  - 输出 Telegram 原生语音卡片格式
-- **依赖**: Edge-TTS API (`openai-edge-tts` 容器 `127.0.0.1:5050`)、FFmpeg
+| 服务 | 端点 | 用途 |
+|---|---|---|
+| WeChat OCR | `POST http://127.0.0.1:5000/ocr` | 图片取字（中英文精度高）。JSON 传 base64 图片，返回 `ocr_response[].text`。纯提字比多模态省得多；要理解图文语义还是你自己看 |
+| Speaches (Whisper) | `localhost:8000` | 语音转文字后端 |
+| OpenAI Edge-TTS | `127.0.0.1:5050` | 文字转语音后端 |
 
-### STT 语音识别引擎
-- **类型**: Python 模块
-- **路径**: `core/stt.py`
-- **入口函数**: `transcribe_voice_file(file_path, model=..., language='zh')`
-- **能力**:
-  - 语音/音频文件转文字
-  - 多语言自动识别
-  - 自动 FFmpeg 兜底重采样 (处理非标准采样率)
-- **依赖**: Speaches 容器 (`127.0.0.1:8000`, Faster-Whisper)、FFmpeg
+## 项目内的 Python 能力
 
----
+需要时用 `cd /home/xwvike/tg-monitor && ./venv/bin/python -c "..."` 调用：
 
-## 👁️ OCR 文字识别
-
-### WeChat OCR API
-- **类型**: Docker 容器
-- **容器名**: `wechat-ocr-api`
-- **镜像**: `golangboyme/wxocr`
-- **端点**: `http://127.0.0.1:5000/ocr`
-- **能力**:
-  - 图片文字提取 (中英文高精度)
-  - 返回文字内容与坐标位置信息
-- **调用方式**: POST JSON，图片需 base64 编码
-  ```bash
-  curl -X POST http://localhost:5000/ocr \
-    -H "Content-Type: application/json" \
-    -d '{"image": "BASE64_ENCODED_IMAGE_DATA"}'
-  ```
-- **返回格式**:
-  ```json
-  {
-    "errcode": 0,
-    "ocr_response": [
-      {"text": "识别出的文字", "left": 80.63, ...}
-    ]
-  }
-  ```
-- **适用场景**: 省 token 的轻量 OCR 任务；对于需要语义理解的复杂图文，优先使用 AGY 多模态视觉能力
+- `core/tts.py` → `generate_telegram_voice(text, voice=...)` 文字转 Telegram 语音卡片
+- `core/stt.py` → `transcribe_voice_file(file_path, model=..., language='zh')` 语音转文字
 
 ---
 
-## 🖼️ 图片处理
-
-### ImageMagick
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/convert` / `/usr/bin/magick`
-- **能力**:
-  - 图片缩放、裁剪、旋转、翻转
-  - 格式转换 (jpg/png/webp/bmp/gif/tiff)
-  - 添加文字水印、边框、滤镜
-  - 批量图片处理
-  - 图片拼接与合成
-- **调用示例**: `convert INPUT -resize 50% -quality 75 OUTPUT`
-
-### pngquant
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/pngquant`
-- **能力**:
-  - PNG 图片有损压缩 (大幅缩小体积，肉眼几乎无差别)
-- **调用示例**: `pngquant --quality=50-75 --force --output OUTPUT INPUT`
-- **适用场景**: 专门针对 PNG 格式的极致压缩，比 ImageMagick 效果更好
-
----
-
-## 📄 文档处理
-
-### Pandoc
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/pandoc`
-- **能力**:
-  - 文档格式互转 (Markdown ↔ HTML ↔ Word/docx ↔ EPUB ↔ LaTeX ↔ RST)
-  - 电子书格式转换
-  - 幻灯片生成
-- **⚠️ 不能直接输出 PDF**: 本机未安装 LaTeX 引擎，`pandoc x.md -o x.pdf` 会失败。
-  如需 PDF，先 `pandoc` 转 HTML/docx，或改用其他路径。
-- **调用示例**: `pandoc INPUT.md -o OUTPUT.docx`
-
-### LibreOffice (headless)
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/soffice`（`libreoffice` 为同一程序的别名）
-- **能力**:
-  - Office 文档转 PDF (xls/xlsx/doc/docx/ppt/pptx/odt/ods/odp → pdf)
-  - Office 格式互转 (xlsx ↔ csv、docx ↔ odt 等)
-- **⚠️ 报错时仍返回 0**: 缺少对应组件或文件损坏时只在 stderr 打印
-  `Error: source file could not be loaded`，退出码依然是 0 —— 判断成败必须
-  看**产物是否真的生成**，不能只看返回码。
-- **⚠️ 需要独立的用户配置目录**: 共用默认 profile 时并发调用会抢锁，实测
-  4 个并发有 1 个失败（退出码 1、无产物）。必须为每次转换指定
-  `-env:UserInstallation`。
-- **调用示例**:
-  `soffice --headless -env:UserInstallation=file:///tmp/lo_$$ --convert-to pdf --outdir OUTDIR INPUT.xlsx`
-
-### Ghostscript
-- **类型**: 系统二进制
-- **路径**: `/usr/bin/gs`
-- **能力**:
-  - PDF 压缩与重新采样（`-dPDFSETTINGS` 预设）
-  - PDF 合并、拆分、页面提取
-  - PostScript ↔ PDF 互转
-  - **保留文字层**：压缩后仍可搜索、可复制（先转图片再合成则会丢失）
-- **调用示例**: `gs -q -dNOPAUSE -dBATCH -dSAFER -sDEVICE=pdfwrite -dPDFSETTINGS=/ebook -sOutputFile=OUT.pdf IN.pdf`
-
-### poppler-utils (PDF 工具集)
-- **类型**: 系统二进制
-- **核心命令**:
-  - `pdftotext` — PDF 转纯文本
-  - `pdfimages` — 提取 PDF 中的图片
-  - `pdfinfo` — 查看 PDF 元信息 (页数、作者等)
-  - `pdftoppm` — PDF 页面转图片 (PNG/JPEG)
-- **调用示例**: `pdftotext INPUT.pdf OUTPUT.txt`
-
----
-
-## 📦 其他已知服务 (非文件处理，但 AGY 可调用)
-
-| 服务 | 容器名 | 端口 | 用途 |
-|------|--------|------|------|
-| Speaches (Whisper) | `speaches` | `localhost:8000` | STT 语音识别后端 |
-| OpenAI Edge-TTS | `openai-edge-tts` | `127.0.0.1:5050` | TTS 语音合成后端 |
-| qBittorrent | `qbittorrent` | — | 下载管理 |
-| MinIO | `minio` | `localhost:9000` | 对象存储 |
-| PostgreSQL | `postgres` | `localhost:5432` | 关系型数据库 |
-| MySQL | `mysql` | `localhost:3306` | 关系型数据库 |
-| Redis | `redis` | `localhost:6379` | 缓存/消息队列 |
-
----
-
-> **⚠️ 工具链扩展规范**
->
-> 本文件由 `load_toolchain()` **直接内联进 Planner 的 prompt** —— 它不是给人看的
-> 说明书，而是模型规划命令时依据的"能力地图"。写错一个函数名或声明一个没安装的
-> 工具，就会直接误导规划。
->
-> 因此新增任何工具或容器时，必须同步：
-> 1. 更新本清单
-> 2. 在 `install.sh` 的 `TOOLCHAIN` 映射中登记（否则新机器上不会被安装）
->
-> `tests/test_toolchain_doc.py` 会校验：本文声明的 Python 入口函数在对应模块中
-> 真实存在，且声明的每个二进制都被 `install.sh` 覆盖并在本机可执行。
+> **扩展规范**：新增工具或容器时，同步更新本清单与 `install.sh` 的 `TOOLCHAIN`
+> 映射（否则新机器上不会被安装）。`tests/test_toolchain_doc.py` 会校验本文声明的
+> Python 入口函数真实存在、声明的每个二进制都被 `install.sh` 覆盖且本机可执行。
