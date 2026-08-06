@@ -35,6 +35,7 @@ from core.file_pipeline import (
     plan_and_execute,
     safe_filename,
 )
+from core.run_archive import archive_root, archive_run, prune
 from core.stt import transcribe_voice_file
 from core.tg_format import code_block, esc, send_html
 from core.tts import clean_text_for_tts, generate_telegram_voice, should_auto_speak
@@ -217,6 +218,8 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
         status_msg = None
 
     last_text = {"value": ""}
+    trace = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    ok, error = False, None
 
     def on_status(text):
         if status_msg is None or text == last_text["value"]:
@@ -229,7 +232,8 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
 
     try:
         ok, products, error = plan_and_execute(
-            file_paths, workspace_in, workspace_out, caption, model, on_status
+            file_paths, workspace_in, workspace_out, caption, model, on_status,
+            trace=trace,
         )
 
         if ok:
@@ -280,21 +284,41 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
             bot.send_message(chat_id, error, parse_mode="HTML")
     except Exception as e:
         logger.error(f"文件流水线异常: {e}")
+        error = f"流水线异常: {e}"
         try:
             bot.send_message(chat_id, f"❌ 文件处理流水线异常: {e}")
         except Exception:
             pass
     finally:
+        # 先尽力归档（move 走后原目录自然不存在），再无条件走一遍清理兜底 ——
+        # 这样"归档没跑成"和"留痕被关掉"都不会留下泄漏路径
+        trace.update({
+            "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": ok,
+            "error": error,
+            "chat_id": chat_id,
+            "message_id": message.message_id,
+            "tg_photo": tg_photo,
+        })
+        try:
+            archive_run(WORKSPACE_ROOT, workspace_in, workspace_out, trace)
+        except Exception as e:
+            logger.warning(f"任务留痕失败: {e}")
         _cleanup_dirs([workspace_in, workspace_out])
 
 
 def sweep_workspaces():
-    """启动时清空遗留的文件工作区。
+    """启动时清空遗留的**在途**工作区（in/ 与 out/）。
 
-    进程被 kill 或重启时，正在处理的任务走不到清理分支，其工作区会永久留下。
+    进程被 kill 或重启时，正在处理的任务走不到收尾分支，其工作区会永久留下。
     工作区在真实磁盘上（不再是重启即清空的 tmpfs），这道清扫是唯一的回收点。
     启动那一刻不可能有任务在飞，因此整体清空是安全的。
+
+    archive/ 绝不在清扫范围内 —— 那是留痕，是任务结束后特意留下的证据，
+    它的回收由 run_archive.prune 按配额负责。这里顺手 prune 一次：
+    进程停了一段时间再起来时，过期的归档该在此刻就被回收，而不是等下一次任务。
     """
+    protected = os.path.abspath(archive_root(WORKSPACE_ROOT))
     removed = 0
     for sub in ("in", "out"):
         root = os.path.join(WORKSPACE_ROOT, sub)
@@ -304,6 +328,9 @@ def sweep_workspaces():
             path = os.path.join(root, name)
             if not os.path.isdir(path):
                 continue
+            # 显式复核而非只靠 ("in","out") 这个白名单：留痕一旦被误删就没了
+            if os.path.abspath(path).startswith(protected + os.sep):
+                continue
             try:
                 shutil.rmtree(path)
                 removed += 1
@@ -311,6 +338,10 @@ def sweep_workspaces():
                 logger.warning(f"清理遗留工作区 {path} 失败: {e}")
     if removed:
         logger.info(f"🧹 启动清扫：已回收 {removed} 个遗留文件工作区")
+    try:
+        prune(archive_root(WORKSPACE_ROOT))
+    except Exception as e:
+        logger.warning(f"启动时回收归档失败: {e}")
 
 
 def _cleanup_dirs(dirs):

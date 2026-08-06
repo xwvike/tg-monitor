@@ -16,6 +16,7 @@ from tests import (
     test_file_pipeline,
     test_message_routing,
     test_rescue,
+    test_run_archive,
     test_tg_format,
     test_toolchain_doc,
     test_user_state,
@@ -29,6 +30,7 @@ ALL_SUITES = (
     + test_toolchain_doc.SUITES
     + test_file_pipeline.SUITES
     + test_message_routing.SUITES
+    + test_run_archive.SUITES
 )
 
 

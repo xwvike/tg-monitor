@@ -117,6 +117,25 @@ Telegram 会**按文件内容嗅探并在服务端重编码**，与你调用哪�
 > 再决定走哪个方法 —— 返回的 `file_size` 是重编码**之后**的值，看它发现不了问题。
 > `tests/test_file_pipeline.py::test_gif_product_delivery` 守护该行为。
 
+### 3.03 菜谱调参的铁律：先看产物，再动参数
+转换质量的问题（糊、尺寸不对、体积失控）**不许凭直觉改菜谱**。ffmpeg 命令的
+参数看起来是否合理与产物实际好不好是两回事，只读日志永远得不出结论。
+
+流程是固定的：
+
+1. 去 `workspace/archive/` 找那次任务的目录（`run.json` 里有用户原话与命令原文）。
+2. 拿 `in/` 的原文件和 `out/` 的产物**实测**：`ffprobe` 比分辨率/帧率，
+   `ffmpeg -lavfi ssim` 比画质，`ls -l` 比体积。
+3. 只在有测量结果支撑时才改 `config/file_recipes/*.md`，并把测得的数字写进菜谱注释。
+
+留痕不在时（`TG_ARCHIVE_ENABLED=0` 或那次早于配额期限）就用同类素材复现一遍，
+**不要跳过测量直接改参数** —— 那正是把 `bayer_scale` 从 5 改成 3 这类"改了个寂寞
+甚至改坏"的来源。已实测的结论：`bayer_scale` 5 > 3 > 1（SSIM，渐变与细节素材皆然），
+`palettegen` 的 `stats_mode` 默认就是 `full`，显式写它是空操作。
+
+> `core/run_archive.py` 负责留痕与配额，`tests/test_run_archive.py` 守护它。
+> 归档目录不受启动清扫影响；回收只按 `.env` 的容量/天数配额进行。
+
 ### 3.05 外部输入进入 shell 的铁律
 `execute_commands` 以 `shell=True` 执行 Planner 生成的命令，输入文件的**绝对路径
 会原样出现在命令中**。因此凡是来自外部的名称（Telegram 提供的 `file_name`、

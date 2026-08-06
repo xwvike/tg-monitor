@@ -702,8 +702,14 @@ def _disproportionate_products(products, input_bytes):
     )
 
 
-def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on_status=None):
-    """规划 → 执行 → 失败回喂重规划。返回 (ok, products, error_message)。"""
+def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model,
+                     on_status=None, trace=None):
+    """规划 → 执行 → 失败回喂重规划。返回 (ok, products, error_message)。
+
+    trace 是调用方传进来的 dict，本函数往里填「这次到底干了什么」：命中的菜谱、
+    每一轮的命令与失败原因。它会被 run_archive 写到产物旁边的 run.json —— 命令
+    单看日志也有，但和它产出的文件对不上号，调参就只能靠猜。
+    """
 
     def status(text):
         if on_status:
@@ -721,6 +727,23 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
     )
     failure = None
     retry_reason = None
+
+    if trace is not None:
+        trace["caption"] = caption
+        trace["model"] = model
+        trace["recipes"] = [
+            name for name, _body in
+            select_recipes([os.path.basename(p) for p in file_paths], caption)
+        ]
+        trace["attempts"] = []
+
+    def record(attempt, commands, ok, failure=None, note=None):
+        if trace is None:
+            return
+        trace["attempts"].append({
+            "attempt": attempt, "commands": commands,
+            "ok": ok, "failure": failure, "note": note,
+        })
 
     for attempt in range(1, MAX_PLAN_ATTEMPTS + 1):
         if attempt == 1:
@@ -754,6 +777,7 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
         commands = _extract_commands(output)
         if not commands:
             logger.error(f"无法从规划输出提取命令: {output[-1200:]}")
+            record(attempt, [], False, note="规划输出里没有合法的 <json> 命令数组")
             if attempt < MAX_PLAN_ATTEMPTS:
                 failure = {
                     "cmd": "(上一轮没有输出合法的 <json> 命令数组)",
@@ -764,6 +788,7 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
 
         status(f"🚀 正在执行 {len(commands)} 步处理...")
         exec_ok, failure = execute_commands(commands, workspace_in)
+        record(attempt, commands, exec_ok, failure)
         if not exec_ok:
             retry_reason = "error"
             if attempt < MAX_PLAN_ATTEMPTS:
@@ -779,6 +804,10 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
                 if oversized and attempt < MAX_PLAN_ATTEMPTS:
                     # 不是失败，只是明显失衡 —— 把实际体积告诉 Planner 让它降参重做
                     logger.info(f"产物与输入失衡，回喂重规划: {oversized}")
+                    # 这一轮命令是绿的，产物却被丢弃重做 —— 不记下来，
+                    # 归档里就只剩最后一轮，看不出"曾经生成过更大的版本"
+                    if trace is not None and trace["attempts"]:
+                        trace["attempts"][-1]["note"] = f"产物被判定失衡并丢弃重做：{oversized}"
                     retry_reason = "oversize"
                     for path in products:
                         try:
@@ -804,6 +833,8 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model, on
                 "命令全部返回 0 但输出目录为空，回喂重规划。最后一条命令: "
                 f"{commands[-1][:200]}"
             )
+            if trace is not None and trace["attempts"]:
+                trace["attempts"][-1]["note"] = "命令全部返回 0，但输出目录为空"
             failure = {
                 "cmd": commands[-1],
                 "stderr": "所有命令返回码为 0，但输出目录中没有任何文件。请检查输出路径是否写对。",
