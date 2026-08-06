@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests import (
     test_file_pipeline,
+    test_material,
     test_message_routing,
     test_rescue,
     test_run_archive,
@@ -31,6 +32,7 @@ ALL_SUITES = (
     + test_file_pipeline.SUITES
     + test_message_routing.SUITES
     + test_run_archive.SUITES
+    + test_material.SUITES
 )
 
 

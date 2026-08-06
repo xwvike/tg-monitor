@@ -7,6 +7,7 @@
 - **核心逻辑 (`core/`)**:
   - `core/bot.py`: Telegram 机器人 Layer 0 微内核 (动态时间戳版本 vYYYY.MM.DD-HHMM)
   - `core/task_engine.py`: 声明式动态任务调度引擎 (APScheduler + 语法防错 + 热加载)
+  - `core/material.py`: **素材判定** —— 抽帧+探事实交给模型判断"这是什么素材"
   - `core/file_pipeline.py`: **文件处理流水线** —— 意图判定、菜谱检索、元数据探针、
     Planner 规划、命令执行与错误回喂、产物回收
   - `core/tg_format.py`: Telegram HTML 转义与安全发送（解析失败自动降级重发）
@@ -21,7 +22,9 @@
   - `test_user_state.py`: 原子写（含 SIGKILL 实测）、损坏留档、线程安全
   - `test_tg_format.py`: HTML 转义、发送兜底、源码静态扫描
   - `test_toolchain_doc.py`: TOOLCHAIN.md 与代码 / install.sh 的一致性
-  - `test_file_pipeline.py`: 意图判定、菜谱、执行层、编排回喂、文件名注入防护
+  - `test_file_pipeline.py`: 执行层、编排回喂、产物投递、文件名注入防护
+  - `test_material.py`: 素材事实的算术、抽帧、判定门控与失败降级
+  - `test_run_archive.py`: 任务留痕、配额回收、trace 写入
   - `test_message_routing.py`: 文件/文本三种到达顺序、caption 归属、会话隔离
 - **配置与持久化 (`config/`)**:
   - `config/tasks.yaml`: 纯声明式定时任务配置表 (不含凭证，凭证由 `.env` 直接提供)
@@ -209,6 +212,21 @@ Telegram 会**按文件内容嗅探并在服务端重编码**，与你调用哪�
 
 菜谱因此也要换形态：**不写填空式命令模板，写权衡** —— 每个旋钮花什么代价、
 什么素材在意什么、失败长什么样，外加几个成品例子。让模型依据判定结论自己组命令。
+
+落地：`core/material.py` 做判定，`_needs_material_check()` 决定哪些任务值得多花
+这次调用（目前只有转 GIF 与视频压缩 —— 转写/剪辑的参数与画面无关）。
+判定拿不到结论时返回空串，规划照常进行，只退回菜谱的通用建议。
+`config/file_recipes/video_to_gif.md` 是第一份按新形态重写的菜谱，可作模板。
+
+实测（同一段 2940x1912 屏幕录制，用户需求都是"转gif"）：
+
+| | 宽度 | 抖动 | 色数 | 体积 | 文字区 SSIM |
+|---|---|---|---|---|---|
+| 旧（写死 720） | 720 | bayer:5 | 128 | 598 KB | 0.916 |
+| 新（模型自选） | 1440 | none | 128 | 1.8 MB | **0.970** |
+
+同一套代码换成分形动画素材，模型给出的是 800 宽 + `bayer:5` + **256 色**
+—— 连色数都按素材改了。参数不再是常数，是判断。
 
 ### 3.05 外部输入进入 shell 的铁律
 `execute_commands` 以 `shell=True` 执行 Planner 生成的命令，输入文件的**绝对路径

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import zipfile
 
+from core.material import classify_material
 from core.tg_format import esc
 
 logger = logging.getLogger("FilePipeline")
@@ -531,9 +532,34 @@ def _extract_commands(output):
     return None
 
 
-def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
+MATERIAL_AWARE_RECIPES = {"video_to_gif.md", "video_compression.md"}
+
+
+def _needs_material_check(file_paths, recipe_names):
+    """只有"参数取决于画面长什么样"的任务才值得多花一次调用。
+
+    转写、剪辑、格式转换的参数与画面内容无关，判定对它们是纯浪费。
+    多文件时也跳过：一次判定代表不了一批异质素材。
+    """
+    if len(file_paths) != 1:
+        return False
+    if os.path.splitext(file_paths[0])[1].lower() not in VIDEO_EXTS:
+        return False
+    return bool(set(recipe_names) & MATERIAL_AWARE_RECIPES)
+
+
+def build_plan_prompt(file_paths, workspace_out, caption, failure=None,
+                      material=""):
     metadata = "\n".join(f"  - {probe_file(p)}" for p in file_paths)
     path_list = "\n".join(f"  - {p}" for p in file_paths)
+
+    # 判定结论放在需求之后、手册之前：它是"本次素材是什么"，
+    # 手册里的通用建议要让位于它
+    material_block = (
+        f"\n## 素材判定（由前置调用看过画面后给出，优先于手册里的通用建议）\n"
+        f"{material}\n"
+        if material else ""
+    )
 
     recipes = select_recipes([os.path.basename(p) for p in file_paths], caption)
     if recipes:
@@ -551,7 +577,8 @@ def build_plan_prompt(file_paths, workspace_out, caption, failure=None):
         "## 文件元数据\n"
         f"{metadata}\n\n"
         "## 用户需求\n"
-        f"{caption}\n\n"
+        f"{caption}\n"
+        f"{material_block}\n"
         "## 可用工具链\n"
         f"{load_toolchain()}\n\n"
         "## 相关标准作业手册\n"
@@ -728,14 +755,27 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model,
     failure = None
     retry_reason = None
 
+    recipe_names = [
+        name for name, _body in
+        select_recipes([os.path.basename(p) for p in file_paths], caption)
+    ]
     if trace is not None:
         trace["caption"] = caption
         trace["model"] = model
-        trace["recipes"] = [
-            name for name, _body in
-            select_recipes([os.path.basename(p) for p in file_paths], caption)
-        ]
+        trace["recipes"] = recipe_names
         trace["attempts"] = []
+
+    # 前置判定：让模型看几帧画面，回答"这是什么素材、什么优先"。
+    # 参数好不好取决于素材是什么，而那是判断，不是算术 —— 见 GEMINI.md 3.04。
+    # 拿不到结论不阻断规划，只是退回菜谱的通用建议。
+    material = ""
+    if _needs_material_check(file_paths, recipe_names):
+        status("🔍 正在判读素材类型...")
+        material = classify_material(
+            file_paths[0], call_agy, model, INTERNAL_MARKER
+        )
+    if trace is not None:
+        trace["material"] = material
 
     def record(attempt, commands, ok, failure=None, note=None):
         if trace is None:
@@ -755,7 +795,8 @@ def plan_and_execute(file_paths, workspace_in, workspace_out, caption, model,
             else:
                 status(f"🔧 上一轮执行报错，正在重新规划 (第 {attempt} 次)...")
 
-        prompt = build_plan_prompt(file_paths, workspace_out, caption, failure)
+        prompt = build_plan_prompt(file_paths, workspace_out, caption, failure,
+                                   material=material)
         ok, output, err_kind = call_agy(prompt, model, PLAN_TIMEOUT)
 
         if not ok:
