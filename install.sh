@@ -48,6 +48,15 @@ declare -A TOOLCHAIN=(
     [zstd]=zstd
 )
 
+# 不走 apt 的工具：npm 包 → 提供的命令名。
+# anydoc 是 Node N-API 插件而非独立二进制，`npm i -g` 会落进 nvm 的版本目录，
+# 而 systemd 下 bot 给 agy 的 PATH 里没有那个路径 —— 装了也调不到。
+# 因此固定装到 $NODE_TOOL_PREFIX，再在 ~/.local/bin 放一个用系统 node 拉起的包装。
+declare -A NODE_TOOLCHAIN=(
+    [anydoc]="@firecrawl/anydoc"
+)
+NODE_TOOL_PREFIX="$HOME/.local/lib"
+
 # 有些能力**无法靠"命令是否存在"判断**：soffice 二进制由 core 提供，
 # 但缺了 calc/writer/impress 组件就读不了对应格式，而 libreoffice
 # 报错时仍返回 0 —— 只会静默产不出文件。这类必须直接查包。
@@ -171,6 +180,15 @@ if $CHECK_ONLY; then
             ok "$pkg"
         else
             bad "$pkg 缺失 — soffice 存在但读不了对应格式，且失败时仍返回 0"
+        fi
+    done
+
+    step "文档读取工具 (npm 装，非 apt)"
+    for cmd in "${!NODE_TOOLCHAIN[@]}"; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            ok "$cmd 可用: $("$cmd" --version 2>&1 | head -n1)"
+        else
+            bad "$cmd 缺失 (npm 包: ${NODE_TOOLCHAIN[$cmd]}) — agy 读 office 文档会退回慢路径"
         fi
     done
 
@@ -316,6 +334,42 @@ if [ ${#missing_pkgs[@]} -gt 0 ]; then
     done
 else
     ok "系统工具链已齐全"
+fi
+
+step "[2.5/7] 安装文档读取工具 (npm)"
+node_bin=""
+for cand in /usr/bin/node /usr/local/bin/node; do
+    [ -x "$cand" ] && { node_bin="$cand"; break; }
+done
+if [ -z "$node_bin" ]; then
+    warn "未找到系统级 node（/usr/bin/node）—— 跳过 ${!NODE_TOOLCHAIN[*]}"
+    echo "     agy 读 office 文档会退回 soffice/pandoc 慢路径，功能不受影响。"
+    echo "     要启用请先 apt install nodejs，再重跑本脚本。"
+    echo "     注意：nvm 装的 node 不算 —— systemd 下 bot 给 agy 的 PATH 看不到它。"
+else
+    mkdir -p "$NODE_TOOL_PREFIX" "$HOME/.local/bin"
+    for cmd in "${!NODE_TOOLCHAIN[@]}"; do
+        pkg="${NODE_TOOLCHAIN[$cmd]}"
+        pkg_dir="$NODE_TOOL_PREFIX/$cmd"
+        mkdir -p "$pkg_dir"
+        [ -f "$pkg_dir/package.json" ] || (cd "$pkg_dir" && npm init -y >/dev/null 2>&1)
+        if (cd "$pkg_dir" && npm install --omit=dev "$pkg" >/dev/null 2>&1); then
+            cat > "$HOME/.local/bin/$cmd" <<WRAP
+#!/bin/sh
+# 由 install.sh 生成。npm 包是 Node N-API 插件而非独立二进制，
+# 这里固定用系统 node 拉起，避免依赖 nvm 的版本目录（那不在 bot 给 agy 的 PATH 上）。
+exec $node_bin "$pkg_dir/node_modules/$pkg/cli.js" "\$@"
+WRAP
+            chmod +x "$HOME/.local/bin/$cmd"
+            if command -v "$cmd" >/dev/null 2>&1; then
+                ok "$cmd 已安装: $("$cmd" --version 2>&1 | head -n1)"
+            else
+                warn "$cmd 已装到 $HOME/.local/bin，但不在当前 PATH 上"
+            fi
+        else
+            warn "$pkg 安装失败 —— agy 读 office 文档会退回慢路径，不影响其他功能"
+        fi
+    done
 fi
 
 step "[3/7] 配置 .env"

@@ -12,7 +12,8 @@
 | `convert` / `magick` | ImageMagick：图片转换、缩放、拼接、加字 |
 | `identify` | 读图片尺寸、格式、色深 |
 | `pngquant` | PNG 有损量化压缩，通常比重编码更划算 |
-| `pandoc` | 文档互转（md / html / docx / odt / epub / rst / txt） |
+| `anydoc` | **读**文档：docx/doc/xlsx/xls/pptx/ppt/odt/ods/odp/rtf/epub/csv/pdf → Markdown。只出不进，见下方说明 |
+| `pandoc` | 文档互转（md / html / docx / odt / epub / rst / txt）。**产出**文档用它 |
 | `soffice` | LibreOffice headless：Office 文档互转与转 PDF |
 | `gs` | Ghostscript：PDF 压缩与合并 |
 | `pdftotext` | 取 PDF 文本层 |
@@ -36,6 +37,26 @@
   （`-O CP936` 直接报用法错误），Windows 来源的 GBK 文件名会解成乱码。
   `unar` 自己会猜编码，猜不准可以 `unar -e GBK`。
 - 解压产物直接写进输出目录即可，**可以带子目录**，系统会处理投递形态。
+
+**要读一个文档的内容，第一选择是 `anydoc`**，别再去 soffice 转一圈或者拆 XML：
+
+```bash
+anydoc 报告.docx              # 输出到 stdout
+anydoc 课表.xlsx -o 课表.md    # 写文件
+anydoc 幻灯片.pptx | head -50  # 先看个开头
+```
+
+一条命令吃 14 种格式，统一吐 GitHub 风格 Markdown，标题层级、表格、列表、
+脚注都保住。本机实测每份 ~50 毫秒，而且是**结构没丢**——同样一份 pptx，
+soffice→PDF→pdftotext 要 1441 毫秒且表格全散成文本。
+
+几个必须知道的边界：
+- **只能读，不能写。** 它只有"任意格式 → Markdown"这一个方向。
+  要产出 docx/html 用 `pandoc`，要产出 PDF 用 `soffice`。
+- **扫描件 PDF 直接报 Unsupported**，它不做 OCR。那条路走 WeChat OCR。
+- **PDF 的表格会塌成一行。** 纯文本层的 PDF 想保住表格对齐，`pdftotext -layout`
+  反而更好；但它不给标题层级。两个都试一下再选。
+- 图片只保留 alt 文本，图里的字要另外走 OCR。
 
 ## 本机服务
 
