@@ -42,15 +42,59 @@
 | 服务 | 端点 | 用途 |
 |---|---|---|
 | WeChat OCR | `POST http://127.0.0.1:5000/ocr` | 图片取字（中英文精度高）。JSON 传 base64 图片，返回 `ocr_response[].text`。纯提字比多模态省得多；要理解图文语义还是你自己看 |
-| Speaches (Whisper) | `localhost:8000` | 语音转文字后端 |
+| Speaches (Whisper) | `POST http://127.0.0.1:8000/v1/audio/transcriptions` | 语音转文字，OpenAI 兼容接口。详见下方 |
 | OpenAI Edge-TTS | `127.0.0.1:5050` | 文字转语音后端 |
+
+### 语音转文字：动手前必读
+
+**要字幕就直接让它出字幕**，别自己拼时间轴：
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/audio/transcriptions \
+  -F "file=@a.wav" -F "model=Systran/faster-whisper-small" \
+  -F "language=zh" -F "response_format=srt" -o a.srt
+```
+
+`response_format` 可取 `srt` / `vtt` / `verbose_json`（带 segment 级时间戳）/
+`json` / `text`。时间轴是接口自带的。
+
+**这台机器是 Intel N100 四核、纯 CPU 跑推理，很慢。** 实测每 60 秒音频（模型已加载）：
+
+| 模型 | 60s 音频耗时 | 相对实时 | 识别质量 |
+|---|---|---|---|
+| `Systran/faster-whisper-base` | 11 秒 | 5.5× | 差，中文人名地名基本靠猜 |
+| `Systran/faster-whisper-small` | 30 秒 | 2× | 可用 |
+| `deepdml/faster-whisper-large-v3-turbo-ct2` | 50 秒 | **1×，即多长音频就跑多久** | 好 |
+
+**冷启动首次加载某个模型另加 3~4 分钟。**
+
+由此推出一条硬约束：
+
+> **你自己会 `timeout waiting for response`，而且没有固定预算。**
+> 同一个 13 分钟的视频实测死过两次：一次撑到 709 秒，一次只撑到 321 秒。
+> 触发条件是**某条命令阻塞太久**，不是总时长到点。冷启动加载模型的那一条
+> `curl` 就足以单独把一轮拖死。
+
+因此：**这台机器上，超过约 3 分钟的音频转写，一次性做不完。别硬上。**
+
+正确的做法是先量、再报、然后问：
+
+1. `ffprobe` 读出总时长。
+2. 按上表估算：`small` 约等于音频时长的一半，`large-v3-turbo` 约等于音频时长本身，
+   首次加载某模型再加 3~4 分钟。
+3. **把这个账算给用户看**，然后给出可选项 —— 只转前几分钟、换更快的模型、
+   或者他把音频切短了分几次发。
+
+短音频（几分钟以内）直接一条 `curl` 出 `srt` 就行，不需要这套。
 
 ## 项目内的 Python 能力
 
 需要时用 `cd /home/xwvike/tg-monitor && ./venv/bin/python -c "..."` 调用：
 
 - `core/tts.py` → `generate_telegram_voice(text, voice=...)` 文字转 Telegram 语音卡片
-- `core/stt.py` → `transcribe_voice_file(file_path, model=..., language='zh')` 语音转文字
+- `core/stt.py` → `transcribe_voice_file(file_path, model=..., language='zh')`
+  语音转文字。**只适合几十秒的语音消息**：内部 HTTP 超时写死 30 秒、ffmpeg 转码
+  超时 20 秒，且只返回纯文本没有时间戳。长音频和字幕任务一律直接调上面的 HTTP 接口。
 
 ---
 

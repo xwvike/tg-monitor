@@ -230,12 +230,18 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
             pass
 
     try:
-        ok, products, reply, error = run_task(
+        ok, products, reply, error, warning = run_task(
             file_paths, workspace_in, workspace_out, caption, model, on_status,
             trace=trace,
         )
 
         if ok:
+            # "跑完了但不对劲"必须说出来，且要排在产物前面 —— 否则用户看到的
+            # 就只是一个中间文件安静地躺在那儿，还以为那就是成品。
+            if warning:
+                send_html(bot, chat_id, warning,
+                          reply_to_message_id=message.message_id)
+
             # agy 的文字回复先发：它可能是"这就是答案"（用户只是问了个问题），
             # 也可能是"我这么做的、参数为什么这么选"的说明。分流已经删了，
             # 两种情况现在走同一条路 —— 有产物就连产物一起发，没产物就只发话。

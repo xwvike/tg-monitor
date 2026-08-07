@@ -495,7 +495,7 @@ def test_tg_photo_flag(s):
                     pass
 
             orig_run, orig_html = ah.run_task, ah.send_html
-            ah.run_task = lambda *a, **k: (True, [product], "", None)
+            ah.run_task = lambda *a, **k: (True, [product], "", None, None)
             ah.send_html = lambda b, cid, txt, **k: sent.append(txt)
             try:
                 _REAL_RUN_FILE_TASK(_Bot(), photo(90), [product], work, wout,

@@ -270,45 +270,56 @@ def test_run_task_outcomes(s):
 
         s.section("正常：有产物 + 有文字回复")
         fp.AGY_BIN = _fake_agy(work, f'echo "我把它转成了 GIF"\ntouch {wout}/out.gif\n')
-        ok, products, reply, err = fp.run_task([src], win, wout, "转gif", "m")
+        ok, products, reply, err, warn = fp.run_task([src], win, wout, "转gif", "m")
         s.check("成功", ok, True)
         s.check("拿到产物", [os.path.basename(p) for p in products], ["out.gif"])
         s.truthy("拿到回复", "转成了 GIF" in reply)
         s.check("无错误", err, None)
+        s.check("无警告", warn, None)
         os.remove(os.path.join(wout, "out.gif"))
 
         s.section("只回答不动手（用户只是问了个问题）")
         fp.AGY_BIN = _fake_agy(work, 'echo "这是一段屏幕录制"\n')
-        ok, products, reply, err = fp.run_task([src], win, wout, "这是什么", "m")
+        ok, products, reply, err, warn = fp.run_task([src], win, wout, "这是什么", "m")
         s.check("仍算成功", ok, True)
         s.check("没有产物", products, [])
         s.truthy("有回复", "屏幕录制" in reply)
+        s.check("不算异常", warn, None)
 
         s.section("agy 失败且什么都没产出")
         fp.AGY_BIN = _fake_agy(work, 'echo "工具不支持这个格式"\nexit 1\n')
-        ok, products, reply, err = fp.run_task([src], win, wout, "转gif", "m")
+        ok, products, reply, err, _w = fp.run_task([src], win, wout, "转gif", "m")
         s.check("判为失败", ok, False)
         s.truthy("错误里带上了 agy 的说明", "工具不支持" in (err or ""))
 
-        s.section("退出码非 0 但产物已生成 → 仍算成功")
-        # agy 常在收尾做点无关紧要的事失败，产物已经躺在那儿就不该判失败
+        s.section("退出码非 0 但产物已生成 → 算成功，但必须警告")
+        # 产物很可能只是中间文件：实测有一次"抽音频→STT→出字幕"，agy 死在
+        # 第二步，回收到的 mp3 只是中转品，却被静默当成交付物发走了。
         fp.AGY_BIN = _fake_agy(work, f'touch {wout}/done.gif\nexit 1\n')
-        ok, products, _reply, _err = fp.run_task([src], win, wout, "转gif", "m")
+        ok, products, _reply, _err, warn = fp.run_task([src], win, wout, "转gif", "m")
         s.check("算成功", ok, True)
         s.check("产物在", [os.path.basename(p) for p in products], ["done.gif"])
+        s.truthy("给出了未跑完的警告", warn is not None and "没有跑完" in warn)
         os.remove(os.path.join(wout, "done.gif"))
+
+        s.section("正常退出但一句话没说、也没产物")
+        fp.AGY_BIN = _fake_agy(work, "true\n")
+        ok, products, reply, _err, warn = fp.run_task([src], win, wout, "转gif", "m")
+        s.check("算成功", ok, True)
+        s.check("确实什么都没有", (reply, products), ("", []))
+        s.truthy("这件事被说出来了", warn is not None)
 
         s.section("超时")
         fp.TASK_TIMEOUT = 1
         fp.AGY_BIN = _fake_agy(work, "sleep 5\n")
-        ok, products, _reply, err = fp.run_task([src], win, wout, "转gif", "m")
+        ok, products, _reply, err, _w = fp.run_task([src], win, wout, "转gif", "m")
         s.check("判为失败", ok, False)
         s.truthy("说明是超时", "超过" in (err or ""))
 
         s.section("凭证失效要给出可操作的提示")
         fp.TASK_TIMEOUT = original_timeout
         fp.AGY_BIN = _fake_agy(work, 'echo "Error: unauthorized" >&2\nexit 1\n')
-        ok, _p, _r, err = fp.run_task([src], win, wout, "转gif", "m")
+        ok, _p, _r, err, _w = fp.run_task([src], win, wout, "转gif", "m")
         s.check("判为失败", ok, False)
         s.check("给的是登录提示", err, fp.AUTH_HINT)
 
@@ -319,6 +330,16 @@ def test_run_task_outcomes(s):
         s.check("记下用户原话", trace.get("message"), "转gif")
         s.check("记下产物", trace.get("product_names"), ["x.gif"])
         s.truthy("记下 agy 的回复", "ok" in trace.get("reply", ""))
+
+        s.section("stderr 无条件留痕 —— 否则半路死掉时事后无从查起")
+        fp.AGY_BIN = _fake_agy(
+            work, f'echo "boom: 连接被拒绝" >&2\ntouch {wout}/half.mp3\nexit 1\n')
+        trace = {}
+        fp.run_task([src], win, wout, "转字幕", "m", trace=trace)
+        s.truthy("有产物时也留下了 stderr", "连接被拒绝" in trace.get("stderr_tail", ""))
+        s.check("退出码在案", trace.get("returncode"), 1)
+        s.truthy("警告也在案", "没有跑完" in trace.get("warning", ""))
+        os.remove(os.path.join(wout, "half.mp3"))
     finally:
         fp.AGY_BIN, fp.TASK_TIMEOUT = original_bin, original_timeout
         shutil.rmtree(work, ignore_errors=True)

@@ -178,11 +178,15 @@ def build_task_prompt(file_paths, workspace_out, message):
 
 def run_task(file_paths, workspace_in, workspace_out, message, model,
              on_status=None, trace=None):
-    """把任务整个交给 agy 跑完。返回 (ok, products, reply, error)。
+    """把任务整个交给 agy 跑完。返回 (ok, products, reply, error, warning)。
 
     与旧实现的根本区别：这里不解析命令、不执行命令、不回喂重规划。
     agy 自己看得见报错，自己会重试 —— 那是它的强项，而把 stderr 抠出来
     再拼一段"请修正"喂回去，只是在模仿它本来就有的能力。
+
+    `warning` 是"跑完了但不对劲"：agy 非零退出却留下了产物，或者一句话
+    都没说。这两种情况以前都被当成成功静默放过 —— 用户拿到一个中间文件
+    却没有任何解释，而 stderr 连日志都没进，事后完全无从查起。
     """
 
     def status(text):
@@ -215,36 +219,57 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
     except subprocess.TimeoutExpired:
         if trace is not None:
             trace["agy_error"] = "timeout"
-        return False, [], "", f"⏰ 任务超过 {TASK_TIMEOUT // 60} 分钟仍未完成，已中止。"
+        return (False, [], "",
+                f"⏰ 任务超过 {TASK_TIMEOUT // 60} 分钟仍未完成，已中止。", None)
     except Exception as e:
         logger.error(f"调用 agy 异常: {e}")
         if trace is not None:
             trace["agy_error"] = str(e)
-        return False, [], "", f"❌ 无法启动 AGY: {e}"
+        return False, [], "", f"❌ 无法启动 AGY: {e}", None
 
     combined = (res.stdout or "") + (res.stderr or "")
     if _is_auth_failure(combined):
         if trace is not None:
             trace["agy_error"] = "auth"
-        return False, [], "", AUTH_HINT
+        return False, [], "", AUTH_HINT, None
 
     reply = (res.stdout or "").strip()
+    stderr = (res.stderr or "").strip()
     if trace is not None:
         trace["returncode"] = res.returncode
         trace["reply"] = reply[:4000]
+        # stderr 无条件留痕。以前只在"非零且无产物"时才打日志，结果 agy 半路
+        # 死掉但留下中间文件的那次，报错连一个字都没留下，事后完全查不了。
+        if stderr:
+            trace["stderr_tail"] = stderr[-4000:]
+
+    if res.returncode != 0:
+        logger.error(f"agy 退出码 {res.returncode}: {combined[-1500:]}")
 
     products = collect_outputs(workspace_in, workspace_out, original_inputs)
     if trace is not None:
         trace["product_names"] = [os.path.relpath(p, workspace_out) for p in products]
 
     if res.returncode != 0 and not products:
-        logger.error(f"agy 退出码 {res.returncode}: {combined[-800:]}")
         return False, [], reply, (
             "❌ AGY 未能完成本次任务。\n"
             + (f"它的说明：\n{reply[-1500:]}" if reply else "（没有返回任何说明）")
-        )
+        ), None
 
-    return True, products, reply, None
+    warning = None
+    if res.returncode != 0:
+        # 产物很可能只是中间文件 —— 实测有一次任务是"抽音频 → STT → 出字幕"，
+        # agy 死在第二步，回收到的 mp3 只是中转品，却被当成交付物静默发走了。
+        warning = (
+            f"⚠️ AGY 中途异常退出（退出码 {res.returncode}），任务<b>没有跑完</b>。\n"
+            "下面这些是它中断前落在输出目录里的东西，可能只是中间文件。"
+        )
+    elif not reply and not products:
+        warning = "⚠️ AGY 正常退出，但既没有产物也没有说任何话。"
+    if warning and trace is not None:
+        trace["warning"] = warning
+
+    return True, products, reply, None, warning
 
 
 def _files_in(d):

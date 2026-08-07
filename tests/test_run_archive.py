@@ -220,7 +220,7 @@ def test_pipeline_fills_trace(s):
         fp.AGY_BIN = fake
         try:
             trace = {}
-            ok, products, reply, _err = fp.run_task(
+            ok, products, reply, _err, _warn = fp.run_task(
                 [os.path.join(win, "clip.mp4")], win, wout, "转成gif", "m",
                 trace=trace,
             )
