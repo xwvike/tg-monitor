@@ -12,7 +12,6 @@
 | `convert` / `magick` | ImageMagick：图片转换、缩放、拼接、加字 |
 | `identify` | 读图片尺寸、格式、色深 |
 | `pngquant` | PNG 有损量化压缩，通常比重编码更划算 |
-| `anydoc` | **读**文档：docx/doc/xlsx/xls/pptx/ppt/odt/ods/odp/rtf/epub/csv/pdf → Markdown。只出不进，见下方说明 |
 | `pandoc` | 文档互转（md / html / docx / odt / epub / rst / txt）。**产出**文档用它 |
 | `soffice` | LibreOffice headless：Office 文档互转与转 PDF |
 | `gs` | Ghostscript：PDF 压缩与合并 |
@@ -38,25 +37,10 @@
   `unar` 自己会猜编码，猜不准可以 `unar -e GBK`。
 - 解压产物直接写进输出目录即可，**可以带子目录**，系统会处理投递形态。
 
-**要读一个文档的内容，第一选择是 `anydoc`**，别再去 soffice 转一圈或者拆 XML：
-
-```bash
-anydoc 报告.docx              # 输出到 stdout
-anydoc 课表.xlsx -o 课表.md    # 写文件
-anydoc 幻灯片.pptx | head -50  # 先看个开头
-```
-
-一条命令吃 14 种格式，统一吐 GitHub 风格 Markdown，标题层级、表格、列表、
-脚注都保住。本机实测每份 ~50 毫秒，而且是**结构没丢**——同样一份 pptx，
-soffice→PDF→pdftotext 要 1441 毫秒且表格全散成文本。
-
-几个必须知道的边界：
-- **只能读，不能写。** 它只有"任意格式 → Markdown"这一个方向。
-  要产出 docx/html 用 `pandoc`，要产出 PDF 用 `soffice`。
-- **扫描件 PDF 直接报 Unsupported**，它不做 OCR。那条路走 WeChat OCR。
-- **PDF 的表格会塌成一行。** 纯文本层的 PDF 想保住表格对齐，`pdftotext -layout`
-  反而更好；但它不给标题层级。两个都试一下再选。
-- 图片只保留 alt 文本，图里的字要另外走 OCR。
+**要读一个文档的内容，第一选择是 `core/docread.py`**（见下方「项目内的 Python
+能力」），别再去 soffice 转一圈或者拆 XML。它吃 14 种格式，统一吐 GitHub 风格
+Markdown，标题层级、表格、列表、脚注都保住 —— 同样一份 pptx，
+soffice→PDF→pdftotext 要 1441 毫秒且表格全散成文本，它 1 毫秒出 md 表格。
 
 ## 本机服务
 
@@ -146,6 +130,20 @@ Whisper 内部本来就是带上下文的滑动窗口，长音频它自己处理
 
 需要时用 `cd /home/xwvike/tg-monitor && ./venv/bin/python -c "..."` 调用：
 
+- `core/docread.py` → `to_markdown(path)` 文档读成 Markdown。也能直接当命令用：
+  ```bash
+  ./venv/bin/python core/docread.py 报告.docx              # 打到 stdout
+  ./venv/bin/python core/docread.py 课表.xlsx -o 课表.md    # 写文件
+  ```
+  吃 docx/doc/xlsx/xls/pptx/ppt/odt/ods/odp/rtf/epub/csv/pdf，每份约 1 毫秒。
+  边界：
+  - **只能读，不能写。** 只有「任意格式 → Markdown」这一个方向。
+    要产出 docx/html 用 `pandoc`，要产出 PDF 用 `soffice`。
+  - **扫描件 / 纯图片 PDF 读不了**，它不做 OCR —— 那条路走 WeChat OCR。
+    读不了时它会在 stderr 说清原因和该走哪条替代路线。
+  - **PDF 的表格会塌成一行。** 纯文本层的 PDF 想保住表格对齐，
+    `pdftotext -layout` 反而更好，但它不给标题层级。两个都试一下再选。
+  - 图片只保留 alt 文本，图里的字要另外走 OCR。
 - `core/tts.py` → `generate_telegram_voice(text, voice=...)` 文字转 Telegram 语音卡片
 - `core/stt.py` → `transcribe_voice_file(file_path, model=..., language='zh')`
   语音转文字。**只适合几十秒的语音消息**：内部 HTTP 超时写死 30 秒、ffmpeg 转码

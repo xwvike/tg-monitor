@@ -140,12 +140,90 @@ def test_sandbox_level_count_matches_docs(s):
         s.check(f"{doc} 提及 {total} 级校验", f"{total} 级" in body or f"[2/{total}]" in body, True)
 
 
+def test_docread_actually_reads(s):
+    """清单声称能把文档读成 Markdown —— 这条要真的跑一遍。
+
+    只做 AST 检查是不够的：core/docread.py 是懒导入 anydoc 的，依赖没装上
+    时函数照样存在、照样解析得过，而 agy 拿到的会是一句"未安装"。
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+
+    sys.path.insert(0, PROJECT_DIR)
+    from core.docread import DocReadError, to_markdown
+
+    work = tempfile.mkdtemp()
+    try:
+        s.section("底层依赖真的装上了")
+        try:
+            import anydoc  # noqa: F401
+            s.check("firecrawl-anydoc 可导入", True, True)
+        except ImportError as e:
+            s.check(f"firecrawl-anydoc 可导入 ({e})", False, True)
+            return
+
+        s.section("docx 能读出结构")
+        src = os.path.join(work, "src.md")
+        with open(src, "w", encoding="utf-8") as fh:
+            fh.write("# 季度报告\n\n## 概述\n\n| 地区 | Q1 |\n|---|---|\n| 华北 | 120 |\n")
+        docx = os.path.join(work, "a.docx")
+        made = subprocess.run(["pandoc", src, "-o", docx],
+                              capture_output=True, timeout=60).returncode == 0
+        if not made:
+            s.check("造得出测试 docx", False, True)
+        else:
+            md = to_markdown(docx)
+            s.truthy("标题层级还在", "# 季度报告" in md and "## 概述" in md)
+            s.truthy("表格还是表格", "| 地区 |" in md and "| 华北 |" in md)
+
+        s.section("读不了时给的是人话和替代路线，不是异常类名")
+        bad_file = os.path.join(work, "x.bin")
+        with open(bad_file, "wb") as fh:
+            fh.write(b"\x00\x01 not a document")
+        try:
+            to_markdown(bad_file)
+            s.check("应当抛 DocReadError", False, True)
+        except DocReadError as e:
+            s.truthy("带上了文件名", "x.bin" in str(e))
+            s.truthy("给了替代路线", "OCR" in str(e) or "cat" in str(e))
+
+        s.check("文件不存在也走同一条错误路径",
+                _raises_docread(to_markdown, os.path.join(work, "没有.docx")), True)
+
+        s.section("命令行入口可用")
+        res = subprocess.run(
+            [_sys.executable, os.path.join(PROJECT_DIR, "core", "docread.py"), docx],
+            capture_output=True, text=True, timeout=60)
+        s.check("退出码 0", res.returncode, 0)
+        s.truthy("stdout 是 Markdown", "# 季度报告" in res.stdout)
+        res = subprocess.run(
+            [_sys.executable, os.path.join(PROJECT_DIR, "core", "docread.py"), bad_file],
+            capture_output=True, text=True, timeout=60)
+        s.check("读不了时退出码非 0", res.returncode, 1)
+        s.truthy("原因写在 stderr", len(res.stderr.strip()) > 0)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _raises_docread(fn, *args):
+    from core.docread import DocReadError
+    try:
+        fn(*args)
+    except DocReadError:
+        return True
+    except Exception:
+        return False
+    return False
+
+
 SUITES = [
     ("文档引用完整性", test_docs_reference_real_files),
     ("文档无过期计数", test_docs_avoid_rotting_counts),
     ("快照清单一致性", test_snapshot_manifest_consistency),
     ("沙箱级数一致性", test_sandbox_level_count_matches_docs),
     ("入口函数一致性", test_python_entrypoints_exist),
+    ("文档读取真的能用", test_docread_actually_reads),
     ("二进制覆盖", test_declared_binaries_are_installable),
 ]
 
