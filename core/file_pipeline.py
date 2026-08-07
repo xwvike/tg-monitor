@@ -163,6 +163,8 @@ def build_task_prompt(file_paths, workspace_out, message):
         "## 规则\n"
         f"1. **要回传给用户的产物，一律写进这个目录**：{workspace_out}\n"
         "   写在别处用户永远拿不到 —— 这个目录之外的路径对他毫无意义，不要在回复里报。\n"
+        f"   目录里可以有子目录（解压之类）；产物少时系统会摊平逐个发，"
+        f"超过 {MAX_INLINE_PRODUCTS} 个会连目录结构一起打包成 zip 再发。\n"
         "2. 输入文件保持原样不动，需要中间文件就放输出目录并在结束前删掉。\n"
         "3. 不要安装软件包，也不要改动系统配置。缺工具就用现有的完成，"
         "或直接说明做不到以及可行的替代做法。\n"
@@ -233,7 +235,7 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
 
     products = collect_outputs(workspace_in, workspace_out, original_inputs)
     if trace is not None:
-        trace["product_names"] = [os.path.basename(p) for p in products]
+        trace["product_names"] = [os.path.relpath(p, workspace_out) for p in products]
 
     if res.returncode != 0 and not products:
         logger.error(f"agy 退出码 {res.returncode}: {combined[-800:]}")
@@ -246,10 +248,39 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
 
 
 def _files_in(d):
+    """递归列出目录下的全部普通文件，返回相对 d 的路径。
+
+    必须递归：解压类任务的产物天然带目录结构，只看顶层的话
+    `out/报告/正文.docx` 是看不见的，一次成功的解压会被判成"什么都没产出"。
+
+    符号链接一律跳过。压缩包里可以塞一条指向 /etc/shadow 的软链，
+    解压后它就躺在输出目录里，照单全收等于把宿主机文件投递给用户。
+    """
+    found = []
     try:
-        return sorted(f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f)))
+        for root, dirs, files in os.walk(d):
+            dirs[:] = [x for x in dirs if not os.path.islink(os.path.join(root, x))]
+            for f in files:
+                full = os.path.join(root, f)
+                if os.path.islink(full):
+                    logger.warning(f"跳过符号链接产物: {os.path.relpath(full, d)}")
+                    continue
+                if os.path.isfile(full):
+                    found.append(os.path.relpath(full, d))
     except OSError:
         return []
+    return sorted(found)
+
+
+def _prune_empty_dirs(root):
+    """自底向上清掉空目录。摊平/打包之后留下的空壳没有意义。"""
+    for cur, dirs, files in os.walk(root, topdown=False):
+        if cur == root:
+            continue
+        try:
+            os.rmdir(cur)
+        except OSError:
+            pass
 
 
 def collect_outputs(workspace_in, workspace_out, original_inputs=()):
@@ -263,41 +294,82 @@ def collect_outputs(workspace_in, workspace_out, original_inputs=()):
         return [os.path.join(workspace_out, f) for f in products]
 
     # 输入目录里比原始输入多出来的文件，就是落错地方的产物
-    for f in _files_in(workspace_in):
-        if f in original_inputs:
+    for rel in _files_in(workspace_in):
+        if rel in original_inputs:
             continue
+        dst = os.path.join(workspace_out, rel)
         try:
-            shutil.move(os.path.join(workspace_in, f),
-                        os.path.join(workspace_out, f))
-            logger.info(f"兜底回收落在输入目录的产物: {f}")
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(os.path.join(workspace_in, rel), dst)
+            logger.info(f"兜底回收落在输入目录的产物: {rel}")
         except Exception as e:
-            logger.warning(f"回收产物 {f} 失败: {e}")
+            logger.warning(f"回收产物 {rel} 失败: {e}")
+    _prune_empty_dirs(workspace_in)
 
     return [os.path.join(workspace_out, f) for f in _files_in(workspace_out)]
 
 
-def package_products(products, workspace_out, archive_stem="output"):
-    """产物过多时打包成单个 zip；未超阈值则原样返回。
+def _flatten_products(products, workspace_out):
+    """把嵌套产物就地摊平成顶层文件，返回新路径列表。
 
-    返回 (最终投递列表, 是否已打包)。
+    Telegram 投递没有"目录"这个概念，`_send_product` 认的是单个文件。
+    嵌套的 `报告/图/p1.png` 摊成 `报告_图_p1.png`：既保住了它原本在哪，
+    也避免两个不同子目录下的同名文件互相覆盖。
+    """
+    rels = {p: os.path.relpath(p, workspace_out) for p in products}
+    # 顶层文件先占名，嵌套的再让位 —— 否则用户原本就看得懂的名字会被挤走
+    taken = {rel for rel in rels.values() if os.sep not in rel}
+    result = [p for p in sorted(products) if os.sep not in rels[p]]
+
+    for path in sorted(products):
+        rel = rels[path]
+        if os.sep not in rel:
+            continue
+        name = safe_filename(rel.replace(os.sep, "_"), "output")
+        stem, ext = os.path.splitext(name)
+        n = 1
+        while name in taken:
+            n += 1
+            name = f"{stem}_{n}{ext}"
+        taken.add(name)
+        dest = os.path.join(workspace_out, name)
+        try:
+            shutil.move(path, dest)
+            result.append(dest)
+        except Exception as e:
+            logger.warning(f"摊平产物 {rel} 失败: {e}")
+            result.append(path)
+
+    _prune_empty_dirs(workspace_out)
+    return sorted(result)
+
+
+def package_products(products, workspace_out, archive_stem="output"):
+    """决定产物怎么投递。返回 (最终投递列表, 是否已打包)。
+
+    - 超过 MAX_INLINE_PRODUCTS：打成单个 zip，**包内保留原有目录结构**。
+      到了这个量级，目录结构本身就是内容的一部分，摊平反而是破坏。
+    - 未超过：摊平成顶层文件逐个投递。解压出三个文件就该收到三个文件，
+      而不是收到一个重新压好的包。
     """
     if len(products) <= MAX_INLINE_PRODUCTS:
-        return products, False
+        return _flatten_products(products, workspace_out), False
 
     archive = os.path.join(workspace_out, f"{safe_filename(archive_stem, 'output')}.zip")
     try:
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
             for path in sorted(products):
-                zf.write(path, os.path.basename(path))
+                zf.write(path, os.path.relpath(path, workspace_out))
     except Exception as e:
         logger.error(f"打包产物失败，改为逐个投递: {e}")
-        return products, False
+        return _flatten_products(products, workspace_out), False
 
     for path in products:
         try:
             os.remove(path)
         except OSError:
             pass
+    _prune_empty_dirs(workspace_out)
     logger.info(f"产物 {len(products)} 个超过 {MAX_INLINE_PRODUCTS}，已打包")
     return [archive], True
 

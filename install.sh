@@ -41,6 +41,11 @@ declare -A TOOLCHAIN=(
     [pdftoppm]=poppler-utils
     [gs]=ghostscript
     [soffice]=libreoffice-core-nogui
+    [unar]=unar
+    [lsar]=unar
+    [zip]=zip
+    [unzip]=unzip
+    [zstd]=zstd
 )
 
 # 有些能力**无法靠"命令是否存在"判断**：soffice 二进制由 core 提供，

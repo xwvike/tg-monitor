@@ -20,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import types
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -157,6 +158,100 @@ def test_output_collection(s):
         s.section("什么都没产出")
         os.remove(os.path.join(wout, "stray.gif"))
         s.check("返回空", fp.collect_outputs(win, wout, originals), [])
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_nested_products(s):
+    """解压类任务的产物带目录结构 —— 这条路曾经整条是死的。
+
+    `_files_in` 只看顶层时，`out/报告/正文.docx` 一个都收不到，
+    一次成功的解压会被判成"什么都没产出"。
+    """
+    work = tempfile.mkdtemp()
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(os.path.join(wout, "报告", "图"))
+        for rel in ("报告/正文.docx", "报告/图/p1.png", "顶层.txt"):
+            with open(os.path.join(wout, rel.replace("/", os.sep)), "w") as fh:
+                fh.write("x")
+
+        s.section("子目录里的产物要被收到")
+        got = fp.collect_outputs(win, wout)
+        s.check("回收到 3 个", len(got), 3)
+        s.truthy("含嵌套两层的那个",
+                 any(p.endswith(os.path.join("图", "p1.png")) for p in got))
+
+        s.section("少量产物摊平成顶层文件逐个投递")
+        final, packed = fp.package_products(got, wout, "src")
+        s.check("未打包", packed, False)
+        names = sorted(os.path.basename(p) for p in final)
+        s.check("摊平后的文件名", names,
+                sorted(["报告_图_p1.png", "报告_正文.docx", "顶层.txt"]))
+        s.truthy("产物真的在顶层", all(os.path.dirname(p) == wout for p in final))
+        s.truthy("每个都存在", all(os.path.exists(p) for p in final))
+        s.check("空目录已清掉", os.path.exists(os.path.join(wout, "报告")), False)
+
+        s.section("摊平后撞名的产物不会互相覆盖")
+        # a/p.png 摊平后就叫 a_p.png，和已经存在的顶层 a_p.png 正面相撞
+        shutil.rmtree(wout)
+        os.makedirs(os.path.join(wout, "a"))
+        with open(os.path.join(wout, "a_p.png"), "w") as fh:
+            fh.write("顶层原本就有的")
+        with open(os.path.join(wout, "a", "p.png"), "w") as fh:
+            fh.write("子目录里的")
+        final, _ = fp.package_products(fp.collect_outputs(win, wout), wout, "src")
+        s.check("两个都活下来了", len(final), 2)
+        s.check("文件名互不相同", len({os.path.basename(p) for p in final}), 2)
+        bodies = []
+        for p in final:
+            with open(p, encoding="utf-8") as fh:
+                bodies.append(fh.read())
+        bodies.sort()
+        s.check("内容都没被覆盖", bodies, ["子目录里的", "顶层原本就有的"])
+        s.truthy("顶层原名没被挤走",
+                 os.path.join(wout, "a_p.png") in final)
+
+        s.section("产物过多时打包，包内保留目录结构")
+        shutil.rmtree(wout)
+        os.makedirs(os.path.join(wout, "sub"))
+        for i in range(fp.MAX_INLINE_PRODUCTS + 1):
+            with open(os.path.join(wout, "sub", f"p{i}.png"), "w") as fh:
+                fh.write("x")
+        final, packed = fp.package_products(fp.collect_outputs(win, wout), wout, "src")
+        s.check("已打包", packed, True)
+        s.check("只剩一个投递目标", len(final), 1)
+        with zipfile.ZipFile(final[0]) as z:
+            entries = z.namelist()
+        s.truthy("包内保留了 sub/ 层级",
+                 all(e.startswith("sub/") for e in entries) and len(entries) ==
+                 fp.MAX_INLINE_PRODUCTS + 1)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_symlink_products_are_refused(s):
+    """压缩包可以塞一条指向宿主机文件的软链，解压后它就躺在输出目录里。
+
+    照单全收等于把 /etc/shadow 投递给用户。
+    """
+    work = tempfile.mkdtemp()
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        with open(os.path.join(wout, "真产物.txt"), "w") as fh:
+            fh.write("ok")
+        os.symlink("/etc/hostname", os.path.join(wout, "leak.txt"))
+        os.makedirs(os.path.join(work, "outside"))
+        with open(os.path.join(work, "outside", "secret.txt"), "w") as fh:
+            fh.write("secret")
+        os.symlink(os.path.join(work, "outside"), os.path.join(wout, "escape"))
+
+        s.section("软链不进产物清单")
+        got = [os.path.basename(p) for p in fp.collect_outputs(win, wout)]
+        s.check("只回收真实文件", got, ["真产物.txt"])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -381,6 +476,8 @@ SUITES = [
     ("文件名注入防护", test_filename_injection),
     ("任务 prompt 结构", test_task_prompt_structure),
     ("产物回收", test_output_collection),
+    ("嵌套产物回收与摊平", test_nested_products),
+    ("软链产物拒收", test_symlink_products_are_refused),
     ("agy 收场处置", test_run_task_outcomes),
     ("文本产物内联", test_inline_text_products),
     ("GIF 产物投递", test_gif_product_delivery),
