@@ -493,6 +493,329 @@ def test_probe_reports_facts(s):
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_stt_request_parsing(s):
+    """agy 写的请求文件是外部输入，得当外部输入对待。"""
+    work = tempfile.mkdtemp()
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+
+        s.section("没有请求文件时返回 None")
+        s.check("无请求", fp.read_stt_request(wout), None)
+
+        s.section("坏 JSON 不抛异常")
+        with open(os.path.join(wout, fp.STT_REQUEST_FILE), "w") as fh:
+            fh.write("{ 这不是 json")
+        s.check("忽略掉", fp.read_stt_request(wout), None)
+
+        s.section("正常请求读得出来")
+        with open(os.path.join(wout, fp.STT_REQUEST_FILE), "w", encoding="utf-8") as fh:
+            fh.write('{"file": "a.mp4", "format": "srt", "hotwords": "新途径"}')
+        req = fp.read_stt_request(wout)
+        s.check("文件名", req.get("file"), "a.mp4")
+        s.check("词表", req.get("hotwords"), "新途径")
+
+        s.section("路径穿越挡在工作区外")
+        # agy 写一句 ../../.ssh/id_rsa 就能让系统把工作区外的文件转写出来发走
+        open(os.path.join(win, "real.mp4"), "w").close()
+        outside = os.path.join(work, "secret.mp4")
+        open(outside, "w").close()
+        s.check("命中工作区内的文件",
+                fp._resolve_request_file("real.mp4", win, wout),
+                os.path.join(win, "real.mp4"))
+        s.check("../ 被剥掉后找不到",
+                fp._resolve_request_file("../secret.mp4", win, wout), None)
+        s.check("绝对路径也被剥掉",
+                fp._resolve_request_file(outside, win, wout), None)
+        s.check("空文件名", fp._resolve_request_file("", win, wout), None)
+
+        s.section("软链不给转写")
+        os.symlink(outside, os.path.join(win, "link.mp4"))
+        s.check("拒收软链", fp._resolve_request_file("link.mp4", win, wout), None)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_stt_handoff_round_trip(s):
+    """长音频握手：agy 交回 → 系统代跑 → 主动再叫 agy 收尾。
+
+    这套东西存在的唯一理由是 agy 撑不住长阻塞（实测同一素材死于 709 秒和
+    321 秒各一次）。所以要测的是"两轮真的跑了、且只跑两轮"。
+    """
+    from core import stt as stt_mod
+
+    work = tempfile.mkdtemp()
+    original_bin = fp.AGY_BIN
+    original_transcribe = stt_mod.transcribe_long_audio
+    original_extract = stt_mod.extract_audio
+    calls = []
+
+    def fake_transcribe(path, model=None, language="zh", response_format="srt",
+                        hotwords="", on_progress=None):
+        calls.append({"path": path, "model": model, "hotwords": hotwords,
+                      "format": response_format})
+        return True, "1\n00:00:00,000 --> 00:00:02,000\n新途径\n"
+
+    def fake_extract(video, out_path):
+        with open(out_path, "wb") as fh:
+            fh.write(b"RIFF fake wav")
+        return True, out_path
+
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        src = os.path.join(win, "讲座.mp4")
+        with open(src, "w") as fh:
+            fh.write("x")
+
+        stt_mod.transcribe_long_audio = fake_transcribe
+        stt_mod.extract_audio = fake_extract
+
+        # 第一轮写请求文件就收工；第二轮（转写稿已存在）才做最终产物
+        script = (
+            f'if [ -f "{wout}/讲座.srt" ]; then\n'
+            f'  echo "已按上下文修掉同音字"\n'
+            f'  cp "{wout}/讲座.srt" "{wout}/讲座_已校对.srt"\n'
+            f'else\n'
+            f'  echo "音频较长，已交给系统代跑"\n'
+            f'  printf \'{{"file":"讲座.mp4","model":"m1","format":"srt",'
+            f'"hotwords":"新途径 教师招聘"}}\' > "{wout}/{fp.STT_REQUEST_FILE}"\n'
+            f'fi\n'
+        )
+        fp.AGY_BIN = _fake_agy(work, script)
+
+        trace = {}
+        ok, products, reply, err, warn = fp.run_task(
+            [src], win, wout, "转成字幕", "m", trace=trace)
+
+        s.section("代跑真的发生了")
+        s.check("成功", ok, True)
+        s.check("无错误", err, None)
+        s.check("无异常警告", warn, None)
+        s.check("只转写了一次", len(calls), 1)
+        s.check("词表原样传给了转写", calls[0]["hotwords"], "新途径 教师招聘")
+        s.check("模型原样传给了转写", calls[0]["model"], "m1")
+
+        s.section("视频先抽了音轨，且临时文件不留下")
+        s.truthy("转写的是抽出来的 wav", calls[0]["path"].endswith(".wav"))
+        s.check("临时 wav 已清理",
+                os.path.exists(os.path.join(wout, ".stt_audio.wav")), False)
+
+        s.section("请求文件不会当成产物发给用户")
+        s.check("请求文件已删",
+                os.path.exists(os.path.join(wout, fp.STT_REQUEST_FILE)), False)
+        s.truthy("产物里没有它",
+                 all(fp.STT_REQUEST_FILE not in os.path.basename(p) for p in products))
+
+        s.section("收尾轮跑了，用户看到的是收尾轮的话")
+        s.truthy("是收尾轮的回复", "同音字" in reply)
+        s.truthy("不是第一轮的回复", "交给系统代跑" not in reply)
+        s.truthy("最终产物在", any("已校对" in os.path.basename(p) for p in products))
+
+        s.section("留痕留下了这次代跑的全过程")
+        s.check("请求在案", trace["stt_request"]["hotwords"], "新途径 教师招聘")
+        s.check("代跑结果在案", trace["stt_ok"], True)
+        s.truthy("收尾轮回复在案", "同音字" in trace.get("followup_reply", ""))
+    finally:
+        fp.AGY_BIN = original_bin
+        stt_mod.transcribe_long_audio = original_transcribe
+        stt_mod.extract_audio = original_extract
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_stt_handoff_failure(s):
+    """代跑失败时必须是明确失败，不能又变成"发个中间文件了事"。"""
+    from core import stt as stt_mod
+
+    work = tempfile.mkdtemp()
+    original_bin = fp.AGY_BIN
+    original_transcribe = stt_mod.transcribe_long_audio
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        src = os.path.join(win, "a.wav")
+        with open(src, "w") as fh:
+            fh.write("x")
+
+        stt_mod.transcribe_long_audio = (
+            lambda *a, **k: (False, "转写服务返回 503"))
+        fp.AGY_BIN = _fake_agy(work, (
+            f'echo "交给系统"\n'
+            f'printf \'{{"file":"a.wav"}}\' > "{wout}/{fp.STT_REQUEST_FILE}"\n'
+        ))
+
+        ok, products, _reply, err, _w = fp.run_task(
+            [src], win, wout, "转字幕", "m")
+
+        s.section("转写失败 → 明确失败")
+        s.check("判为失败", ok, False)
+        s.check("没有产物", products, [])
+        s.truthy("错误里带上了原因", "503" in (err or ""))
+
+        s.section("请求的文件不存在时同样是失败")
+        stt_mod.transcribe_long_audio = lambda *a, **k: (True, "x")
+        fp.AGY_BIN = _fake_agy(work, (
+            f'echo "交给系统"\n'
+            f'printf \'{{"file":"根本没有这个文件.wav"}}\' '
+            f'> "{wout}/{fp.STT_REQUEST_FILE}"\n'
+        ))
+        ok, _p, _r, err, _w = fp.run_task([src], win, wout, "转字幕", "m")
+        s.check("判为失败", ok, False)
+        s.truthy("说清是找不到文件", "找不到" in (err or ""))
+    finally:
+        fp.AGY_BIN = original_bin
+        stt_mod.transcribe_long_audio = original_transcribe
+        shutil.rmtree(work, ignore_errors=True)
+
+
+SRT_SAMPLE = """1
+00:00:00,000 --> 00:00:12,600
+教考有捷径 就来新途径 我是讲师亚航
+
+2
+00:00:12,600 --> 00:00:19,600
+四川省教师招聘的整体考情分析 干资 泸州 特朗教师
+
+3
+00:00:19,600 --> 00:00:28,940
+它主要分为两大形式 一个是教师工招 第二个是特朗教师招聘
+"""
+
+
+def test_corrections_table(s):
+    """改错走替换表，不让模型重写字幕文件。
+
+    实测让 agy 改写一份 365 条的 srt，交回来只剩 82 条：中间 30 秒的内容
+    被整段丢掉，其余被并成几十秒一条 —— 而它在回复里声称"时间轴完全不变"。
+    """
+    work = tempfile.mkdtemp()
+    try:
+        s.section("两种写法都读得出来")
+        for body, label in (
+            ('[{"from": "干资", "to": "甘孜"}, {"from": "特朗", "to": "特岗"}]', "数组"),
+            ('{"干资": "甘孜", "特朗": "特岗"}', "对象"),
+        ):
+            with open(os.path.join(work, fp.STT_CORRECTIONS_FILE), "w",
+                      encoding="utf-8") as fh:
+                fh.write(body)
+            s.check(f"{label}写法", sorted(fp.read_corrections(work)),
+                    [("干资", "甘孜"), ("特朗", "特岗")])
+
+        s.section("坏输入不抛异常，也不产生垃圾替换")
+        for body in ("{ 不是 json", '[{"from": "x"}]', '{"同": "同"}', "[]", '"字符串"'):
+            with open(os.path.join(work, fp.STT_CORRECTIONS_FILE), "w",
+                      encoding="utf-8") as fh:
+                fh.write(body)
+            s.check(f"{body[:14]!r} → 空", fp.read_corrections(work), [])
+
+        s.section("替换后条数与时间轴一字不动")
+        srt = os.path.join(work, "a.srt")
+        with open(srt, "w", encoding="utf-8") as fh:
+            fh.write(SRT_SAMPLE)
+        before = fp.subtitle_timeline(srt)
+        hit, miss = fp.apply_corrections(
+            srt, [("干资", "甘孜"), ("特朗", "特岗"), ("工招", "公招"),
+                  ("这词不存在", "x")])
+        with open(srt, encoding="utf-8") as fh:
+            body = fh.read()
+        s.check("生效 3 条", hit, 3)
+        s.check("未命中 1 条", miss, 1)
+        s.check("时间轴逐行相同", fp.subtitle_timeline(srt), before)
+        s.check("条数不变", len(before), 3)
+        s.truthy("错字没了", "干资" not in body and "特朗" not in body)
+        s.truthy("对的字在", "甘孜" in body and "特岗" in body and "公招" in body)
+
+        s.section("长词优先，短词不会先啃掉长词的一半")
+        # 短的先替就再也匹配不上长的了：结果会停在"特岗教师"而不是"特岗教师招聘"
+        p2 = os.path.join(work, "b.srt")
+        with open(p2, "w", encoding="utf-8") as fh:
+            fh.write("1\n00:00:00,000 --> 00:00:01,000\n特朗教师\n")
+        fp.apply_corrections(p2, [("特朗", "特岗"), ("特朗教师", "特岗教师招聘")])
+        with open(p2, encoding="utf-8") as fh:
+            body2 = fh.read()
+        s.truthy("长规则整条命中", "特岗教师招聘" in body2)
+
+        s.section("空表不改文件")
+        stamp = os.path.getmtime(srt)
+        s.check("什么都不做", fp.apply_corrections(srt, []), (0, 0))
+        s.check("文件未被重写", os.path.getmtime(srt), stamp)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def test_timeline_tamper_is_reported(s):
+    """就算那段"别改写字幕"没被听进去，也得当场发现并说出来。"""
+    from core import stt as stt_mod
+
+    work = tempfile.mkdtemp()
+    original_bin = fp.AGY_BIN
+    original_transcribe = stt_mod.transcribe_long_audio
+    try:
+        win, wout = os.path.join(work, "in"), os.path.join(work, "out")
+        os.makedirs(win)
+        os.makedirs(wout)
+        src = os.path.join(win, "a.wav")
+        with open(src, "w") as fh:
+            fh.write("x")
+        stt_mod.transcribe_long_audio = lambda *a, **k: (True, SRT_SAMPLE)
+
+        s.section("收尾轮把 3 条压成 1 条 → 必须报警")
+        # 第一轮写请求；第二轮把字幕重写成一条（正是 agy 真实干过的事）
+        script = (
+            f'if [ -f "{wout}/a.srt" ]; then\n'
+            f'  printf "1\\n00:00:00,000 --> 00:00:28,940\\n全都并成一条了\\n"'
+            f' > "{wout}/a.srt"\n'
+            f'  echo "已校对，保持原时间轴完全不变"\n'
+            f'else\n'
+            f'  printf \'{{"file":"a.wav"}}\' > "{wout}/{fp.STT_REQUEST_FILE}"\n'
+            f'fi\n'
+        )
+        fp.AGY_BIN = _fake_agy(work, script)
+        trace = {}
+        ok, _products, _reply, err, warn = fp.run_task(
+            [src], win, wout, "转字幕", "m", trace=trace)
+        s.check("仍算成功", ok, True)
+        s.check("无错误", err, None)
+        s.truthy("报了时间轴被改", warn is not None and "时间轴被改动" in warn)
+        s.truthy("说清了少了多少", "3" in (warn or "") and "1" in (warn or ""))
+        s.check("留痕记下前后条数",
+                trace.get("stt_timeline_altered"), {"before": 3, "after": 1})
+
+        s.section("老老实实只出改正表 → 不报警且改正生效")
+        shutil.rmtree(wout)
+        os.makedirs(wout)
+        script = (
+            f'if [ -f "{wout}/a.srt" ]; then\n'
+            f'  printf \'[{{"from":"干资","to":"甘孜"}}]\''
+            f' > "{wout}/{fp.STT_CORRECTIONS_FILE}"\n'
+            f'  echo "改了一处地名"\n'
+            f'else\n'
+            f'  printf \'{{"file":"a.wav"}}\' > "{wout}/{fp.STT_REQUEST_FILE}"\n'
+            f'fi\n'
+        )
+        fp.AGY_BIN = _fake_agy(work, script)
+        trace = {}
+        ok, products, _reply, _err, warn = fp.run_task(
+            [src], win, wout, "转字幕", "m", trace=trace)
+        s.check("无警告", warn, None)
+        s.check("改正生效 1 条", trace.get("stt_corrections", {}).get("applied"), 1)
+        with open(os.path.join(wout, "a.srt"), encoding="utf-8") as fh:
+            body = fh.read()
+        s.truthy("错字已替换", "甘孜" in body and "干资" not in body)
+        s.check("时间轴仍是 3 条", len(fp.subtitle_timeline(os.path.join(wout, "a.srt"))), 3)
+        s.section("改正表本身不会被当成产物发给用户")
+        s.truthy("产物里没有它",
+                 all(fp.STT_CORRECTIONS_FILE not in os.path.basename(x)
+                     for x in products))
+    finally:
+        fp.AGY_BIN = original_bin
+        stt_mod.transcribe_long_audio = original_transcribe
+        shutil.rmtree(work, ignore_errors=True)
+
+
 SUITES = [
     ("文件名注入防护", test_filename_injection),
     ("任务 prompt 结构", test_task_prompt_structure),
@@ -500,6 +823,11 @@ SUITES = [
     ("嵌套产物回收与摊平", test_nested_products),
     ("软链产物拒收", test_symlink_products_are_refused),
     ("agy 收场处置", test_run_task_outcomes),
+    ("转写请求解析与路径防护", test_stt_request_parsing),
+    ("长音频代跑握手", test_stt_handoff_round_trip),
+    ("代跑失败处置", test_stt_handoff_failure),
+    ("转写稿改正表", test_corrections_table),
+    ("时间轴改动必被发现", test_timeline_tamper_is_reported),
     ("文本产物内联", test_inline_text_products),
     ("GIF 产物投递", test_gif_product_delivery),
     ("产物打包", test_product_packaging),

@@ -45,6 +45,17 @@ TG_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024
 # 动辄产出几十个文件，逐个发送会刷屏并触碰 Telegram 频率限制。
 MAX_INLINE_PRODUCTS = 8
 
+# agy 用来把"这活我干不了，太慢"交回给系统的握手文件。放在输出目录里。
+# 之所以要这套东西：转写十几分钟的音频在这台机器上要跑十分钟量级，而 agy
+# 撑不住这么长的阻塞（实测同一素材死于 709 秒和 321 秒各一次）。让 bot 去跑，
+# agy 就不必等；判断"这是不是该转写、用什么词表"仍然留在 agy 手里。
+STT_REQUEST_FILE = "stt_request.json"
+# 转写稿的改错走这份表，而不是让 agy 直接重写字幕文件。
+# 实测让它改写一份 365 条的 srt，交回来只剩 82 条：中间整整 30 秒的内容被丢掉，
+# 其余被并成 30 秒一条的巨块，而它自己在回复里声称"保持原时间轴完全不变"。
+# 长结构化文本重写就是会这样。它判断哪个词错了是真本事，改字这一步归代码。
+STT_CORRECTIONS_FILE = "stt_corrections.json"
+
 # 文本类产物：转写稿、提取的文字等，用户是要"读"而不是"下载"
 TEXT_EXTS = {".txt", ".srt", ".vtt", ".md", ".csv", ".json"}
 # 超过这个长度就仍按文件发送，避免刷屏
@@ -176,6 +187,204 @@ def build_task_prompt(file_paths, workspace_out, message):
     )
 
 
+def _invoke_agy(prompt, model, cwd):
+    """跑一次 agy。一次性调用天然是新会话。"""
+    cmd = [AGY_BIN, "--dangerously-skip-permissions"]
+    if model:
+        cmd.extend(["--model", model])
+    cmd.extend(["-p", prompt])
+    return subprocess.run(
+        cmd, capture_output=True, text=True, timeout=TASK_TIMEOUT,
+        env=agy_env(), cwd=cwd,
+    )
+
+
+def read_stt_request(workspace_out):
+    """读 agy 留下的转写请求。没有或读不动就返回 None。"""
+    path = os.path.join(workspace_out, STT_REQUEST_FILE)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            req = json.load(fh)
+    except Exception as e:
+        logger.warning(f"转写请求文件读不动，忽略: {e}")
+        return None
+    return req if isinstance(req, dict) else None
+
+
+def _resolve_request_file(name, workspace_in, workspace_out):
+    """把请求里的文件名解析成工作区内的真实路径。
+
+    `name` 来自 agy 写的 JSON，必须当外部输入对待：只取 basename，
+    只在 in/ 与 out/ 里找。否则一句 "../../.ssh/id_rsa" 就能让系统
+    把工作区外的文件转写出来发走。
+    """
+    base = os.path.basename(str(name or "").strip())
+    if not base:
+        return None
+    for d in (workspace_in, workspace_out):
+        cand = os.path.join(d, base)
+        if os.path.isfile(cand) and not os.path.islink(cand):
+            return cand
+    return None
+
+
+def fulfil_stt_request(req, workspace_in, workspace_out, on_status=None):
+    """按 agy 的请求跑完转写，产物写进输出目录。
+
+    返回 (是否成功, 转写稿路径或错误说明)。
+    """
+    from core import stt
+
+    def status(text):
+        if on_status:
+            try:
+                on_status(text)
+            except Exception:
+                pass
+
+    src = _resolve_request_file(req.get("file"), workspace_in, workspace_out)
+    if not src:
+        return False, f"转写请求里的文件 {req.get('file')!r} 在工作区里找不到"
+
+    fmt = str(req.get("format") or "srt").lower()
+    model = str(req.get("model") or stt.DEFAULT_STT_MODEL)
+    hotwords = str(req.get("hotwords") or "").strip()
+    language = str(req.get("language") or "zh")
+
+    ext = os.path.splitext(src)[1].lower()
+    audio = src
+    tmp_wav = None
+    if ext in VIDEO_EXTS or ext not in AUDIO_EXTS:
+        # 视频要抽音轨；非音频扩展名也走一遍归一化，让 ffmpeg 去判断能不能解
+        tmp_wav = os.path.join(workspace_out, ".stt_audio.wav")
+        status("🎧 正在抽取音轨...")
+        ok, err = stt.extract_audio(src, tmp_wav)
+        if not ok:
+            if os.path.exists(tmp_wav):
+                try:
+                    os.remove(tmp_wav)
+                except OSError:
+                    pass
+            return False, err
+        audio = tmp_wav
+
+    duration = stt.audio_duration(audio)
+    status(
+        f"🎙️ 正在转写 {duration / 60:.1f} 分钟音频（{model.split('/')[-1]}），"
+        f"预计数分钟，请稍候..."
+    )
+    ok, body = stt.transcribe_long_audio(
+        audio, model=model, language=language,
+        response_format=fmt, hotwords=hotwords,
+    )
+    if tmp_wav and os.path.exists(tmp_wav):
+        try:
+            os.remove(tmp_wav)
+        except OSError:
+            pass
+    if not ok:
+        return False, body
+
+    stem = safe_filename(os.path.splitext(os.path.basename(src))[0], "transcript")
+    suffix = fmt if fmt in stt.SUBTITLE_FORMATS else "txt"
+    out_path = os.path.join(workspace_out, f"{stem}.{suffix}")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return True, out_path
+
+
+def subtitle_timeline(path):
+    """抽出字幕文件里的时间轴行，用来核对有没有被动过。"""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return re.findall(r"^[\d:,.]+\s*-->\s*[\d:,.]+\s*$", fh.read(),
+                              re.MULTILINE)
+    except OSError:
+        return []
+
+
+def read_corrections(workspace_out):
+    """读 agy 写的改正表。支持 [{"from":..,"to":..}] 与 {"错":"对"} 两种写法。"""
+    path = os.path.join(workspace_out, STT_CORRECTIONS_FILE)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except Exception as e:
+        logger.warning(f"改正表读不动，忽略: {e}")
+        return []
+    pairs = []
+    if isinstance(raw, dict):
+        pairs = [(k, v) for k, v in raw.items()]
+    elif isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                pairs.append((item.get("from"), item.get("to")))
+            elif isinstance(item, (list, tuple)) and len(item) == 2:
+                pairs.append((item[0], item[1]))
+    return [(str(a), str(b)) for a, b in pairs
+            if isinstance(a, str) and a and isinstance(b, str) and a != b]
+
+
+def apply_corrections(path, pairs):
+    """把改正表套到转写稿上。返回 (生效条数, 未命中条数)。
+
+    纯字符串替换，不碰行结构，因此条数与时间轴**不可能**被改动。
+    长的先替换，避免短词把长词的一部分先吃掉。
+    """
+    if not pairs:
+        return 0, 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            body = fh.read()
+    except OSError as e:
+        logger.warning(f"改正表无法应用: {e}")
+        return 0, len(pairs)
+
+    hit = miss = 0
+    for wrong, right in sorted(pairs, key=lambda kv: -len(kv[0])):
+        if wrong in body:
+            body = body.replace(wrong, right)
+            hit += 1
+        else:
+            miss += 1
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    logger.info(f"转写稿改正: 生效 {hit} 条，未命中 {miss} 条")
+    return hit, miss
+
+
+def build_followup_prompt(transcript_path, workspace_out, message, req):
+    """转写跑完之后，把结果交回给 agy 收尾。"""
+    return (
+        f"{INTERNAL_MARKER}\n"
+        "接着上一轮：你请求系统代跑的语音转写已经完成了。\n\n"
+        "## 用户最初说的话\n"
+        f"{(message or '').strip() or '（没有附任何文字）'}\n\n"
+        "## 转写结果\n"
+        f"文件：{transcript_path}\n"
+        f"格式：{req.get('format') or 'srt'}　"
+        f"模型：{req.get('model') or '默认'}　"
+        f"词表：{req.get('hotwords') or '（未指定）'}\n\n"
+        "## 接下来\n"
+        "1. 读一遍转写稿。它是机器出的，同音字错误常见（人名、地名、专有名词、"
+        "考试术语）。把你**结合上下文能确定**的错字整理成一份改正表，写到"
+        f"{os.path.join(workspace_out, STT_CORRECTIONS_FILE)}：\n"
+        '   `[{"from": "干资", "to": "甘孜"}, {"from": "特朗", "to": "特岗"}]`\n'
+        "   系统会用它做逐字替换。只写你有把握的，写错了会被原样替换进去。\n"
+        f"2. **不要自己重写或改写这份转写稿**（{os.path.basename(transcript_path)}）。\n"
+        "   实测让模型改写一份 365 条的字幕，交回来只剩 82 条 —— 中间整段内容被丢掉、"
+        "剩下的被并成几十秒一条。改字这件事交给上面那张表，你负责判断哪个字错了。\n"
+        f"3. 用户最初的要求如果不止是要字幕（比如要摘要、要提纲），照做，"
+        f"产物写进 {workspace_out}。那些是新文件，随你怎么写。\n"
+        "4. **不要**再请求一次转写 —— 这一轮已经是收尾。\n"
+        "5. 回复用中文，简短说明你改了哪类错误、还做了什么。\n"
+    )
+
+
 def run_task(file_paths, workspace_in, workspace_out, message, model,
              on_status=None, trace=None):
     """把任务整个交给 agy 跑完。返回 (ok, products, reply, error, warning)。
@@ -206,16 +415,8 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
         trace["prompt_chars"] = len(prompt)
 
     status("🤖 正在处理...")
-    cmd = [AGY_BIN, "--dangerously-skip-permissions"]
-    if model:
-        cmd.extend(["--model", model])
-    cmd.extend(["-p", prompt])
-
     try:
-        res = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=TASK_TIMEOUT,
-            env=agy_env(), cwd=workspace_in,
-        )
+        res = _invoke_agy(prompt, model, workspace_in)
     except subprocess.TimeoutExpired:
         if trace is not None:
             trace["agy_error"] = "timeout"
@@ -246,6 +447,92 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
     if res.returncode != 0:
         logger.error(f"agy 退出码 {res.returncode}: {combined[-1500:]}")
 
+    stt_timeline_warning = None
+    # agy 把长音频转写交回来了：系统代跑，跑完主动再叫它一次收尾。
+    # 只做一轮 —— 第二轮里再写请求文件也不理会，否则就成了死循环。
+    stt_req = read_stt_request(workspace_out)
+    # 无论解析成不成功都把请求文件删掉 —— 留在输出目录里就会被当成产物发给用户
+    try:
+        os.remove(os.path.join(workspace_out, STT_REQUEST_FILE))
+    except OSError:
+        pass
+    if stt_req is not None:
+        if trace is not None:
+            trace["stt_request"] = stt_req
+        logger.info(f"🎙️ agy 请求代跑转写: {stt_req}")
+
+        got, result = fulfil_stt_request(stt_req, workspace_in, workspace_out, status)
+        if trace is not None:
+            trace["stt_ok"] = got
+            trace["stt_result"] = result if got else result[:1000]
+        if not got:
+            logger.error(f"代跑转写失败: {result}")
+            return False, [], reply, f"❌ 语音转写失败：{result}", None
+
+        # 记下代跑产出的原始时间轴，收尾轮之后据此核对有没有被动过
+        baseline_timeline = subtitle_timeline(result)
+
+        status("🤖 转写完成，交回 AGY 收尾...")
+        followup = build_followup_prompt(result, workspace_out, message, stt_req)
+        try:
+            res2 = _invoke_agy(followup, model, workspace_in)
+        except subprocess.TimeoutExpired:
+            res2 = None
+            logger.error("收尾轮 agy 超时")
+        except Exception as e:
+            res2 = None
+            logger.error(f"收尾轮 agy 异常: {e}")
+
+        if res2 is not None:
+            reply2 = (res2.stdout or "").strip()
+            if trace is not None:
+                trace["followup_returncode"] = res2.returncode
+                trace["followup_reply"] = reply2[:4000]
+                if (res2.stderr or "").strip():
+                    trace["followup_stderr_tail"] = res2.stderr.strip()[-4000:]
+            if res2.returncode != 0:
+                logger.error(f"收尾轮 agy 退出码 {res2.returncode}: "
+                             f"{((res2.stdout or '') + (res2.stderr or ''))[-1500:]}")
+            # 收尾轮的话才是给用户看的；转写前那轮只是"我去请系统代劳"
+            reply = reply2 or reply
+            res = res2
+        else:
+            # 收尾轮没跑起来，但转写稿已经在输出目录里，照样交付
+            reply = reply or ""
+
+        # 改正表由代码来套：纯字符串替换，条数与时间轴不可能被改动
+        pairs = read_corrections(workspace_out)
+        try:
+            os.remove(os.path.join(workspace_out, STT_CORRECTIONS_FILE))
+        except OSError:
+            pass
+        if pairs and os.path.exists(result):
+            hit, miss = apply_corrections(result, pairs)
+            if trace is not None:
+                trace["stt_corrections"] = {"total": len(pairs),
+                                            "applied": hit, "missed": miss}
+
+        # 就算上面那段话没被听进去也要兜住：字幕被重写过就必须说出来。
+        # agy 曾经把 365 条改成 82 条，还在回复里声称"保持原时间轴完全不变"。
+        if baseline_timeline:
+            now_timeline = subtitle_timeline(result)
+            if now_timeline != baseline_timeline:
+                lost = len(baseline_timeline) - len(now_timeline)
+                logger.error(
+                    f"转写稿时间轴被改动: {len(baseline_timeline)} 条 → "
+                    f"{len(now_timeline)} 条")
+                if trace is not None:
+                    trace["stt_timeline_altered"] = {
+                        "before": len(baseline_timeline),
+                        "after": len(now_timeline)}
+                stt_timeline_warning = (
+                    f"⚠️ 字幕的时间轴被改动过："
+                    f"转写产出 {len(baseline_timeline)} 条，交付时只剩 "
+                    f"{len(now_timeline)} 条"
+                    + (f"，少了 {lost} 条。" if lost > 0 else "。")
+                    + "\n很可能有内容被丢掉或被并成了长段，建议核对后再用。"
+                )
+
     products = collect_outputs(workspace_in, workspace_out, original_inputs)
     if trace is not None:
         trace["product_names"] = [os.path.relpath(p, workspace_out) for p in products]
@@ -266,6 +553,8 @@ def run_task(file_paths, workspace_in, workspace_out, message, model,
         )
     elif not reply and not products:
         warning = "⚠️ AGY 正常退出，但既没有产物也没有说任何话。"
+    if stt_timeline_warning:
+        warning = f"{warning}\n\n{stt_timeline_warning}" if warning else stt_timeline_warning
     if warning and trace is not None:
         trace["warning"] = warning
 

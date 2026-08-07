@@ -143,6 +143,119 @@ def transcribe_voice_file(
         return False, res2
 
 
+# ------------------------------------------------------------------------------
+# 长音频转写
+# ------------------------------------------------------------------------------
+
+# 转写速率实测（Intel N100 四核纯 CPU，模型已加载）：small 约为音频时长的一半，
+# large-v3-turbo 约等于音频时长本身，冷启动首次加载再加 3~4 分钟。811 秒的讲座
+# 实测 520 秒。给足余量，超时按音频时长动态算而不是拍一个常数。
+LONG_STT_MIN_TIMEOUT = 600
+LONG_STT_TIMEOUT_RATIO = 4.0
+
+SUBTITLE_FORMATS = ("srt", "vtt")
+TRANSCRIPT_FORMATS = SUBTITLE_FORMATS + ("text", "json", "verbose_json")
+
+
+def audio_duration(file_path: str) -> float:
+    """读音频/视频时长（秒）。读不到返回 0。"""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", file_path],
+            capture_output=True, text=True, timeout=30,
+        )
+        return float((res.stdout or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
+def extract_audio(video_path: str, out_path: str) -> tuple[bool, str]:
+    """从视频抽音轨并归一化成 16kHz 单声道 WAV。
+
+    这条命令里没有任何需要判断的东西 —— Whisper 只吃 16k 单声道，
+    参数是常量，不该拿去问模型。
+    """
+    cmd = ["ffmpeg", "-y", "-v", "error", "-i", video_path,
+           "-vn", "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", out_path]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    except Exception as e:
+        return False, f"抽音轨异常: {e}"
+    if res.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        return False, f"抽音轨失败: {(res.stderr or '')[:300]}"
+    return True, out_path
+
+
+def transcribe_long_audio(
+    file_path: str,
+    model: str = DEFAULT_STT_MODEL,
+    language: str = "zh",
+    response_format: str = "srt",
+    hotwords: str = "",
+    on_progress=None,
+) -> tuple[bool, str]:
+    """一次请求转写整段长音频，返回 (是否成功, 字幕文本或错误说明)。
+
+    **不切片。** 切片曾经是绕开 agy 阻塞超时的手段，但它对质量是净损失：
+    定长切会切在词中间，两边都会被幻觉补全；更糟的是 Whisper 解码时靠前文
+    维持专名一致，切开等于每段从零开始，同一个词在段与段之间来回漂移。
+    Whisper 内部本来就是带上下文的 30 秒滑动窗口，长音频它自己处理得了。
+    实测 811 秒讲座一次请求跑完：365 条字幕、最大空洞 1.0 秒、专名全程稳定。
+
+    `hotwords` 是唯一值得给的质量杠杆：同一段音频同一个模型，加上领域词之后
+    「教考有接近→捷径」「考卿分析→考情」「背考制导→备考指导」三处同音字错
+    全部消失。代价是解码变慢近一倍。
+    （`prompt` 参数刻意不暴露：它会连输出格式一起带偏 —— 实测标点变成空格、
+    阿拉伯数字变成汉字数字。）
+    """
+    if not os.path.exists(file_path):
+        return False, f"找不到目标音频文件: {file_path}"
+    if response_format not in TRANSCRIPT_FORMATS:
+        return False, (f"不支持的输出格式 {response_format!r}，"
+                       f"可选：{'/'.join(TRANSCRIPT_FORMATS)}")
+
+    duration = audio_duration(file_path)
+    timeout = max(LONG_STT_MIN_TIMEOUT, duration * LONG_STT_TIMEOUT_RATIO)
+    logger.info(
+        f"🎙️ 长音频转写: {os.path.basename(file_path)} "
+        f"({duration:.0f}s) model={model} format={response_format} "
+        f"hotwords={hotwords!r} timeout={timeout:.0f}s"
+    )
+    if on_progress:
+        try:
+            on_progress(duration, timeout)
+        except Exception:
+            pass
+
+    data = {"model": model, "language": language, "response_format": response_format}
+    if hotwords:
+        data["hotwords"] = hotwords
+
+    try:
+        with open(file_path, "rb") as fh:
+            resp = requests.post(
+                STT_API_URL, files={"file": (os.path.basename(file_path), fh)},
+                data=data, timeout=timeout,
+            )
+    except requests.Timeout:
+        return False, (
+            f"转写超过 {timeout / 60:.0f} 分钟仍未返回。"
+            f"音频长 {duration / 60:.1f} 分钟，可换更快的模型或只转其中一段。"
+        )
+    except Exception as e:
+        return False, f"请求转写服务失败: {e}"
+
+    if resp.status_code != 200:
+        return False, f"转写服务返回 {resp.status_code}: {resp.text[:300]}"
+
+    body = resp.text.strip()
+    if not body:
+        return False, "转写服务返回了空内容"
+    logger.info(f"✅ 长音频转写完成，{len(body)} 字符")
+    return True, body
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 2:
         print("用法: python3 core/stt.py <音频文件路径> [模型名称]")
