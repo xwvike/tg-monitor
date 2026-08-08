@@ -174,6 +174,37 @@ if $CHECK_ONLY; then
         fi
     done
 
+    # 视频硬编解码（可选加速，非硬性依赖）。
+    # 缺了只是转码回落到 CPU 软编 —— 功能不受影响，所以一律 warn 不 bad。
+    # 加组会永久改动用户权限，按本脚本原则 2 只告知、不代劳。
+    step "视频硬件加速 (核显, 可选)"
+    if [ ! -e /dev/dri/renderD128 ]; then
+        warn "无 /dev/dri/renderD128 — 本机无可用核显, 转码只能走 CPU 软编"
+    else
+        if dpkg -s intel-media-va-driver >/dev/null 2>&1 \
+           || dpkg -s intel-media-va-driver-non-free >/dev/null 2>&1; then
+            ok "VA-API 驱动已装"
+        else
+            warn "缺 VA-API 驱动 — 装: sudo apt install intel-media-va-driver"
+        fi
+        # 注意: 本脚本 set -o pipefail, 不能用 `cmd | grep -q`。grep -q 一匹配就
+        # 关掉管道读端, 左边进程吃 SIGPIPE 以非零退出, pipefail 会把整条管道判为
+        # 失败 —— 明明匹配上了却走 else 分支。所以先取回全部输出再做字符串匹配。
+        _groups="$(id -nG "$USER" 2>/dev/null || true)"
+        if [[ " $_groups " == *" render "* ]]; then
+            ok "$USER 在 render 组"
+        else
+            warn "$USER 不在 render 组 — 服务访问不到 /dev/dri/renderD128, 硬编不可用"
+            echo "     修复: sudo usermod -aG render $USER 然后重启服务"
+        fi
+        _encoders="$(ffmpeg -hide_banner -encoders 2>/dev/null || true)"
+        if [[ "$_encoders" == *h264_vaapi* ]]; then
+            ok "ffmpeg 带 h264_vaapi 编码器"
+        else
+            warn "ffmpeg 未编译 VAAPI 支持 — 硬编不可用"
+        fi
+    fi
+
     step "AGY 智能体引擎"
     if [ -x "$AGY_BIN" ]; then
         ok "agy 已安装: $("$AGY_BIN" --version 2>&1 | head -n1)"
