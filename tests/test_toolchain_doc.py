@@ -114,7 +114,9 @@ def test_snapshot_manifest_consistency(s):
     两者不一致时，还原后会出现"旧代码 + 新测试"这类自相矛盾的组合。
     """
     manage = _read(os.path.join(PROJECT_DIR, "bin", "manage.sh"))
-    packed = set(re.search(r"for item in ([^;]+); do", manage).group(1).split())
+    m = re.search(r"for item in ([^;]+); do", manage)
+    assert m is not None
+    packed = set(m.group(1).split())
     packed_dirs = {x for x in packed if "." not in x}
     wiped = set(re.findall(r'"\$PROJECT_DIR/(\w+)"', manage))
 
@@ -127,12 +129,12 @@ def test_snapshot_manifest_consistency(s):
 
 
 def test_sandbox_level_count_matches_docs(s):
-    """沙箱校验的级数在代码与文档中必须一致。"""
-    bot_src = _read(os.path.join(PROJECT_DIR, "core", "bot.py"))
-    totals = {m[1] for m in re.findall(r"\[(\d)/(\d)\]", bot_src)}
+    """预检流水线的级数在代码与文档中必须一致。"""
+    preflight_src = _read(os.path.join(PROJECT_DIR, "core", "preflight.py"))
+    totals = {m[1] for m in re.findall(r"\[(\d)/(\d)\]", preflight_src)}
 
     s.section("级数一致")
-    s.check("bot.py 中级数唯一", len(totals), 1)
+    s.check("preflight.py 中级数唯一", len(totals), 1)
     total = totals.pop() if totals else "?"
     for doc in ("README.md", "GEMINI.md"):
         body = _read(os.path.join(PROJECT_DIR, doc))

@@ -15,7 +15,6 @@ import sys
 import threading
 import time
 
-import telebot
 import telegramify_markdown
 from telebot import types
 
@@ -217,7 +216,7 @@ def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
         status_msg = None
 
     last_text = {"value": ""}
-    trace = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
+    trace: dict[str, object] = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
     ok, error = False, None
 
     def on_status(text):
@@ -510,9 +509,7 @@ def execute_agy_prompt(
                 )
             except Exception as format_err:
                 logger.warning(f"MarkdownV2 Render Fallback: {format_err}")
-                if len(output) > 3800:
-                    output = output[:3800] + "\n...(内容较长，已截断)"
-                reply_text = f"🤖 <b>agy：</b>\n──────────────────────\n<pre>{telebot.formatting.escape_html(output)}</pre>"
+                reply_text = f"🤖 <b>agy：</b>\n──────────────────────\n{code_block(output, limit=3800)}"
                 bot.send_message(
                     chat_id, reply_text, parse_mode="HTML", reply_markup=tts_markup
                 )
@@ -1341,4 +1338,11 @@ def register_agy_handlers(
 
         return True
 
-    return dispatch_text_message, render_history_page
+    button_handlers = {
+        "chat": handle_chat,
+        "exit": handle_exit,
+        "new": handle_new,
+        "history": handle_history,
+    }
+
+    return dispatch_text_message, render_history_page, button_handlers

@@ -100,3 +100,10 @@ def register_rescue_handlers(bot, allowed_user_id: int):
             )
         except Exception as e:
             send_html(bot, message.chat.id, f"❌ 快照还原失败: {esc(e)}")
+
+    return {
+        "rescue": handle_rescue,
+        "backup": handle_backup,
+        "backups": handle_backups_list,
+        "restore": handle_restore,
+    }

@@ -11,13 +11,12 @@ import sys
 
 import docker
 import psutil
-import telebot
 from telebot import types
 
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-from core.tg_format import esc, send_html
+from core.tg_format import code_block, esc, send_html
 
 logger = logging.getLogger("SystemHandler")
 
@@ -82,10 +81,10 @@ def register_system_handlers(bot, allowed_user_id: int):
                 status_icon = "🟢" if c.status == "running" else "🔴"
                 summary.append(f"{status_icon} <b>{esc(c.name)}</b> ({esc(c.status)})")
                 btn_log = types.InlineKeyboardButton(
-                    f"📜 {c.name} 日志", callback_data=f"docker_log:{c.id[:12]}"
+                    f"📜 {c.name} 日志", callback_data=f"docker_log:{(c.id or '')[:12]}"
                 )
                 btn_restart = types.InlineKeyboardButton(
-                    f"🔄 重启 {c.name}", callback_data=f"docker_restart:{c.id[:12]}"
+                    f"🔄 重启 {c.name}", callback_data=f"docker_restart:{(c.id or '')[:12]}"
                 )
                 markup.add(btn_log, btn_restart)
 
@@ -108,8 +107,7 @@ def register_system_handlers(bot, allowed_user_id: int):
             if action == "docker_log":
                 bot.answer_callback_query(call.id, f"正在获取 {container.name} 日志...")
                 logs = container.logs(tail=30).decode("utf-8", errors="replace")
-                escaped_logs = telebot.formatting.escape_html(logs[-3000:])
-                msg = f"📜 <b>{esc(container.name)} 最新 30 条日志</b>:\n<pre>{escaped_logs}</pre>"
+                msg = f"📜 <b>{esc(container.name)} 最新 30 条日志</b>:\n{code_block(logs[-3000:])}"
                 bot.send_message(call.message.chat.id, msg)
             elif action == "docker_restart":
                 bot.answer_callback_query(call.id, f"正在重启 {container.name}...")

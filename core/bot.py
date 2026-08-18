@@ -7,7 +7,6 @@ Layer 0: 核心通信微内核入口 (core/bot.py)
 
 import logging
 import os
-import subprocess
 import sys
 
 import telebot
@@ -15,15 +14,12 @@ from dotenv import load_dotenv
 from telebot import apihelper, types
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 load_dotenv(os.path.join(os.path.dirname(__file__), "../.env"))
 
 import datetime
 
-from handlers.agy_handler import register_agy_handlers
-from handlers.rescue_handler import register_rescue_handlers
-from handlers.system_handler import register_system_handlers
-
-from core.tg_format import code_block, esc, send_html
+from core.tg_format import esc, send_html
 from core.user_state import UserStateStore
 
 
@@ -128,19 +124,37 @@ def init_commands():
 
 
 # ------------------------------------------------------------------------------
-# 挂载 Handler 优先级分层
+# 挂载 Handler 优先级分层（带隔离保护）
+# L1/L2 为基础设施层，必须注册成功。L3 若导入炸了只降级不崩溃。
 # ------------------------------------------------------------------------------
 
 # Layer 1: 高优先级远程自救与快照指令
-register_rescue_handlers(bot, ALLOWED_USER_ID)
+from handlers.rescue_handler import register_rescue_handlers
+
+rescue_handlers = register_rescue_handlers(bot, ALLOWED_USER_ID)
 
 # Layer 2: 系统与容器状态监测指令
+from handlers.system_handler import register_system_handlers
+
 system_handlers = register_system_handlers(bot, ALLOWED_USER_ID)
 
 # Layer 3: AGY AI 对话与会话管理
-dispatch_text_fn, render_history_fn = register_agy_handlers(
-    bot, ALLOWED_USER_ID, get_user_state, save_user_states, get_main_keyboard
-)
+# L3 依赖链最重（telegramify_markdown, file_pipeline, stt, tts 等），
+# 如果这里炸了（比如某个第三方包没装、Python 版本不兼容），
+# 不应该把 L0/L1/L2 一起拖下水。降级后自救和系统监控仍可用。
+_l3_available = False
+dispatch_text_fn = None
+render_history_fn = None
+agy_button_handlers = None
+try:
+    from handlers.agy_handler import register_agy_handlers
+
+    dispatch_text_fn, render_history_fn, agy_button_handlers = register_agy_handlers(
+        bot, ALLOWED_USER_ID, get_user_state, save_user_states, get_main_keyboard
+    )
+    _l3_available = True
+except Exception as e:
+    logger.error(f"Layer 3 (AGY) 挂载失败，已降级运行: {e}")
 
 # ------------------------------------------------------------------------------
 # 全局常规指令与分发入口
@@ -174,6 +188,8 @@ def send_welcome(message):
         "• <b>/history</b>: 查看并恢复以往的对话记录\n"
         "• <b>/new</b>: 开启新的空白对话"
     )
+    if not _l3_available:
+        help_text += "\n\n⚠️ <b>AGY 层当前不可用，仅自救与系统监控功能正常。</b>"
     bot.send_message(message.chat.id, help_text, reply_markup=kb)
 
 
@@ -189,6 +205,8 @@ def show_version(message):
         f"⚡ <b>底层 AGY 引擎</b>: Google Antigravity\n"
         f"⚙️ <b>服务状态</b>: 生产环境正常运行中"
     )
+    if not _l3_available:
+        ver_msg += "\n⚠️ <b>Layer 3 (AGY) 降级中</b>"
     bot.send_message(message.chat.id, ver_msg)
 
 
@@ -200,7 +218,7 @@ def global_text_router(message):
     text = message.text.strip()
     uid = message.from_user.id
 
-    # 底部 Reply 按钮快捷匹配
+    # L2 底部 Reply 按钮快捷匹配
     button_to_handler = {
         "📊 系统状态": system_handlers["status"],
         "🐳 Docker 容器": system_handlers["docker"],
@@ -212,60 +230,31 @@ def global_text_router(message):
         button_to_handler[text](message)
         return
 
+    # L1 自救按钮 → 委托给 rescue_handler 的统一实现
     if text == "🚨 一键自救":
-        bot.reply_to(message, "🚑 正在运行系统自救与自愈诊断...")
-        try:
-            manage_bin = os.path.abspath(
-                os.path.join(os.path.dirname(__file__), "../bin/manage.sh")
-            )
-            res = subprocess.run(
-                [manage_bin, "rescue"], capture_output=True, text=True, timeout=60
-            )
-            output = res.stdout.strip() or res.stderr.strip() or "自救诊断处理完毕。"
-            send_html(
-                bot,
-                message.chat.id,
-                f"<b>[🚨 系统自救诊断结果]</b>\n{code_block(output)}",
-            )
-        except Exception as e:
-            send_html(bot, message.chat.id, f"❌ 执行异常: {esc(e)}")
+        rescue_handlers["rescue"](message)
         return
-    elif text == "💬 进入 AGY 对话":
-        st = get_user_state(uid)
-        st["in_chat"] = True
-        save_user_states()
-        bot.reply_to(
-            message,
-            "💬 已进入 AGY 沉浸对话模式。请直接发送文本或图片，无需加 /前缀。发送 /exit 随时退出。",
-            reply_markup=get_main_keyboard(uid),
-        )
-        return
-    elif text == "🚪 退出对话":
-        st = get_user_state(uid)
-        st["in_chat"] = False
-        save_user_states()
-        bot.reply_to(
-            message, "🚪 已退出 AGY 对话模式。", reply_markup=get_main_keyboard(uid)
-        )
-        return
-    elif text == "🆕 新建对话":
-        st = get_user_state(uid)
-        st["conv_id"] = None
-        st["in_chat"] = True
-        save_user_states()
-        bot.reply_to(
-            message,
-            "🆕 已重置为新的空白 AGY 会话！请直接输入。",
-            reply_markup=get_main_keyboard(uid),
-        )
-        return
-    elif text == "📜 历史会话":
-        bot.send_chat_action(message.chat.id, "typing")
-        render_history_fn(bot, message.chat.id, 0)
+
+    # L3 对话模式按钮 → 委托给 agy_handler
+    if _l3_available and agy_button_handlers is not None:
+        l3_buttons = {
+            "💬 进入 AGY 对话": "chat",
+            "🚪 退出对话": "exit",
+            "🆕 新建对话": "new",
+            "📜 历史会话": "history",
+        }
+        if text in l3_buttons:
+            agy_button_handlers[l3_buttons[text]](message)
+            return
+    elif text in ("💬 进入 AGY 对话", "🚪 退出对话", "🆕 新建对话", "📜 历史会话"):
+        send_html(bot, message.chat.id, f"⚠️ AGY 层当前不可用: {esc(text)}")
         return
 
     # 路由给 Layer 3 AGY 处理器（若当前处于 chat 模式）
-    handled = dispatch_text_fn(message)
+    if _l3_available and dispatch_text_fn is not None:
+        handled = dispatch_text_fn(message)
+    else:
+        handled = False
     if not handled and not text.startswith("/"):
         bot.send_message(
             message.chat.id,
@@ -279,75 +268,12 @@ def global_text_router(message):
 # ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--test-sandbox":
-        import glob
-        import py_compile
+    if len(sys.argv) > 1 and sys.argv[1] == "--test-preflight":
+        from core.preflight import run as run_preflight
 
-        print(f"=== 🧪 启动分层微内核沙箱健康度与四级校验 (v{VERSION}) ===")
-
-        # [1/4] 真实语法校验：扫描 core/ 与 jobs/ 下全部 Python 文件
-        core_dir = os.path.dirname(os.path.abspath(__file__))
-        project_dir = os.path.dirname(core_dir)
-        py_files = (
-            glob.glob(os.path.join(core_dir, "*.py"))
-            + glob.glob(os.path.join(core_dir, "handlers", "*.py"))
-            + glob.glob(os.path.join(project_dir, "jobs", "*.py"))
-        )
-
-        scan_failed = []
-        for pf in py_files:
-            try:
-                py_compile.compile(pf, doraise=True)
-            except py_compile.PyCompileError as compile_err:
-                scan_failed.append((os.path.relpath(pf, project_dir), str(compile_err)))
-
-        if scan_failed:
-            print(f"[1/4] ❌ 语法预检失败 ({len(scan_failed)} 个文件):")
-            for fname, err_detail in scan_failed:
-                print(f"       {fname}: {err_detail}")
-            sys.exit(1)
-        else:
-            print(
-                f"[1/4] 依赖包与分层 Handler 语法预检: OK ({len(py_files)} 个 Python 文件已扫描)"
-            )
-
-        # [2/4] 业务逻辑单元测试：语法通过不代表行为正确，
-        #       这一级才是能挡住"改坏了但还能跑"的那道闸。
-        try:
-            sys.path.insert(0, project_dir)
-            from tests import run_all
-
-            tests_ok, n_passed, n_failed = run_all.run(verbose=False)
-            if not tests_ok:
-                print(f"[2/4] ❌ 单元测试失败: {n_failed} 项未通过（共 {n_passed + n_failed} 项）")
-                sys.exit(1)
-            print(f"[2/4] 业务逻辑单元测试: OK ({n_passed} 项断言全部通过)")
-        except SystemExit:
-            raise
-        except Exception as e:
-            print(f"[2/4] ❌ 单元测试无法执行: {e}")
-            sys.exit(1)
-
-        # [3/4] Telegram API 联调探针
-        try:
-            me = bot.get_me()
-            print(f"[3/4] Telegram API 联调校验成功: @{me.username} ({me.first_name})")
-        except Exception as e:
-            print(f"[3/4] ❌ Telegram API 联调失败: {e}")
-            sys.exit(1)
-
-        # [4/4] AGY 引擎底层探针
-        try:
-            out = subprocess.check_output(
-                [AGY_BIN, "--version"], stderr=subprocess.STDOUT
-            ).decode("utf-8")
-            print(f"[4/4] AGY 引擎底层探针连通成功: {out.strip()}")
-        except Exception as e:
-            print(f"[4/4] ❌ AGY 引擎探针异常: {e}")
-            sys.exit(1)
-
-        print("✅ 沙箱四级分层校验全部 PASS！准备发布升级！")
-        sys.exit(0)
+        print(f"=== 🧪 启动分层微内核预检流水线与四级校验 (v{VERSION}) ===")
+        ok = run_preflight(bot=bot, agy_bin=AGY_BIN)
+        sys.exit(0 if ok else 1)
 
     load_user_states()
     init_commands()

@@ -132,7 +132,7 @@ class Rig:
         self.bot = FakeBot()
         self.launched = []
         self.state = {"in_chat": True, "conv_id": "c", "model": "m"}
-        self.dispatch_text, _ = ah.register_agy_handlers(
+        self.dispatch_text, _, _btn = ah.register_agy_handlers(
             self.bot, 42, lambda uid: self.state, lambda: None, lambda uid: None
         )
         self.send_photo = self.bot.handlers["handle_photo"]
@@ -412,6 +412,7 @@ def test_workspace_not_on_tmpfs(s):
     # 注意：模块级 WORKSPACE_ROOT 已被本测试文件改写成临时目录，
     # 因此重新读一份未被污染的默认值
     src = importlib.import_module("core.handlers.agy_handler")
+    assert src.__file__ is not None
     default = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(src.__file__))),
         "..", "workspace",
@@ -478,8 +479,11 @@ def test_tg_photo_flag(s):
                 fh.write(b"\x89PNG" + b"0" * 100)
 
             class _Bot:
+                def __init__(self, target_list):
+                    self.sent = target_list
+
                 def send_message(self, cid, txt, **k):
-                    sent.append(txt)
+                    self.sent.append(txt)
                     return types.SimpleNamespace(message_id=1)
 
                 def edit_message_text(self, *a, **k):
@@ -495,10 +499,10 @@ def test_tg_photo_flag(s):
                     pass
 
             orig_run, orig_html = ah.run_task, ah.send_html
-            ah.run_task = lambda *a, **k: (True, [product], "", None, None)
-            ah.send_html = lambda b, cid, txt, **k: sent.append(txt)
+            ah.run_task = lambda *a, _p=product, **k: (True, [_p], "", None, None)
+            ah.send_html = lambda b, cid, txt, _s=sent, **k: _s.append(txt)
             try:
-                _REAL_RUN_FILE_TASK(_Bot(), photo(90), [product], work, wout,
+                _REAL_RUN_FILE_TASK(_Bot(sent), photo(90), [product], work, wout,
                                     "压缩一下", "m", flag)
             finally:
                 ah.run_task, ah.send_html = orig_run, orig_html

@@ -16,7 +16,7 @@ import html
 import logging
 import re
 
-import telebot
+from telebot import formatting
 
 logger = logging.getLogger("TGFormat")
 
@@ -26,7 +26,7 @@ SAFE_LEN = 3500
 
 def esc(value) -> str:
     """转义任意值，使其可安全嵌入 HTML parse_mode 的消息体。"""
-    return telebot.formatting.escape_html(str(value))
+    return formatting.escape_html(str(value))
 
 
 def code_block(text, limit: int = SAFE_LEN) -> str:

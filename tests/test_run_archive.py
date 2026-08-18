@@ -90,6 +90,7 @@ def test_archive_keeps_files_and_commands(s):
             "ok": True,
         }
         dest = ra.archive_run(root, win, wout, trace)
+        assert dest is not None
 
         s.section("工作区被搬进归档而不是删掉")
         s.truthy("返回了归档目录", bool(dest))
@@ -118,8 +119,9 @@ def test_failed_run_is_archived_too(s):
         win, wout = _make_run(root, "fail_1", [("bad.pdf", 512)], [])
         trace = {"ok": False, "error": "转换失败",
                  "attempts": [{"attempt": 1, "commands": ["false"], "ok": False,
-                               "failure": {"cmd": "false", "stderr": "boom"}}]}
+                                "failure": {"cmd": "false", "stderr": "boom"}}]}
         dest = ra.archive_run(root, win, wout, trace)
+        assert dest is not None
 
         s.section("失败任务同样留痕")
         s.truthy("已归档", bool(dest) and os.path.isdir(dest))
@@ -138,7 +140,9 @@ def test_quota_by_size(s):
         dests = []
         for i in range(4):
             win, wout = _make_run(root, f"r{i}", [], [(f"p{i}.bin", 4096)])
-            dests.append(ra.archive_run(root, win, wout, {"n": i}))
+            d = ra.archive_run(root, win, wout, {"n": i})
+            assert d is not None
+            dests.append(d)
             # 同秒内目录名会撞，且 mtime 分不出先后，无法验证"最旧优先"
             os.utime(dests[-1], (time.time() + i, time.time() + i))
 
@@ -155,6 +159,7 @@ def test_quota_by_size(s):
     ):
         win, wout = _make_run(root, "big", [], [("huge.bin", 40960)])
         dest = ra.archive_run(root, win, wout, {})
+        assert dest is not None
         # 归档完立刻被自己触发的回收删掉，等于白留 —— 那次恰恰最值得看
         s.check("超配额的单次留存", os.path.isdir(dest), True)
 
@@ -168,6 +173,7 @@ def test_quota_by_age(s):
         for name, age_days in (("old_a", 30), ("old_b", 20), ("fresh", 1)):
             win, wout = _make_run(root, name, [], [("p.bin", 128)])
             dest = ra.archive_run(root, win, wout, {})
+            assert dest is not None
             stamp = time.time() - age_days * 86400
             os.utime(dest, (stamp, stamp))
             if name == "old_a":
@@ -178,6 +184,7 @@ def test_quota_by_age(s):
                 fresh = dest
 
         ra.prune(ra.archive_root(root))
+        assert old_a is not None and old_b is not None and fresh is not None
         s.section("保留 7 天")
         s.check("30 天前的已回收", os.path.isdir(old_a), False)
         s.check("20 天前的已回收", os.path.isdir(old_b), False)

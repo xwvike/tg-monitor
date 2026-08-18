@@ -85,6 +85,9 @@ def run_script_task(task: dict):
     task_id = task.get("id")
     name = task.get("name", task_id)
     cmd = task.get("command")
+    if not cmd:
+        logger.error(f"脚本任务 [{name}] (ID: {task_id}) 缺少有效的 command 字段")
+        return
     logger.info(f"开始执行脚本任务 [{name}] (ID: {task_id}): {cmd}")
 
     try:
@@ -93,7 +96,7 @@ def run_script_task(task: dict):
             env["HTTP_PROXY"] = PROXY_URL
             env["HTTPS_PROXY"] = PROXY_URL
         res = subprocess.run(
-            cmd,
+            str(cmd),
             shell=True,
             capture_output=True,
             text=True,
@@ -234,7 +237,7 @@ class ConfigManager:
 
         return True
 
-    def poll_for_changes(self) -> tuple[bool, dict]:
+    def poll_for_changes(self) -> tuple[bool, dict | None]:
         """
         检查文件变动。
         防抖机制：变动后需要静默 2 秒且完整校验通过才返回 True 和新配置。

@@ -513,6 +513,7 @@ def test_stt_request_parsing(s):
         with open(os.path.join(wout, fp.STT_REQUEST_FILE), "w", encoding="utf-8") as fh:
             fh.write('{"file": "a.mp4", "format": "srt", "hotwords": "新途径"}')
         req = fp.read_stt_request(wout)
+        assert req is not None
         s.check("文件名", req.get("file"), "a.mp4")
         s.check("词表", req.get("hotwords"), "新途径")
 
