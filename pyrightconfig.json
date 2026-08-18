@@ -1,0 +1,22 @@
+{
+  "venvPath": ".",
+  "venv": "venv",
+  "typeCheckingMode": "basic",
+  "include": [
+    "core",
+    "jobs",
+    "tests",
+    "config",
+    "bin"
+  ],
+  "exclude": [
+    "venv",
+    "workspace",
+    "releases",
+    ".git",
+    "**/__pycache__"
+  ],
+  "reportMissingImports": "error",
+  "reportMissingTypeStubs": false,
+  "pythonVersion": "3.13"
+}
