@@ -147,7 +147,7 @@ dispatch_text_fn = None
 render_history_fn = None
 agy_button_handlers = None
 try:
-    from handlers.agy_handler import register_agy_handlers
+    from handlers.agy import register_agy_handlers
 
     dispatch_text_fn, render_history_fn, agy_button_handlers = register_agy_handlers(
         bot, ALLOWED_USER_ID, get_user_state, save_user_states, get_main_keyboard

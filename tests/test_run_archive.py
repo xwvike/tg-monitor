@@ -250,7 +250,7 @@ def test_sweep_never_touches_archive(s):
     """启动清扫只回收在途工作区，绝不能碰留痕。"""
     src = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "core", "handlers", "agy_handler.py",
+        "core", "handlers", "agy", "utils.py",
     )
     with open(src, encoding="utf-8") as fh:
         body = fh.read()

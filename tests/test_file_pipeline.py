@@ -25,6 +25,9 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import file_pipeline as fp
+from core.handlers import agy as ah
+import core.handlers.agy.tasks as agy_tasks
+ah._send_product = agy_tasks._send_product
 from tests.harness import main
 
 
@@ -352,7 +355,7 @@ def test_inline_text_products(s):
     s.truthy(".srt 属于文本类", ".srt" in fp.TEXT_EXTS)
     s.truthy("有长度上限", fp.INLINE_TEXT_MAX_CHARS > 0)
 
-    from core.handlers import agy_handler as ah
+    from core.handlers import agy as ah
     work = tempfile.mkdtemp()
     try:
         sent = []
@@ -391,7 +394,7 @@ def test_gif_product_delivery(s):
     → 320x180/21KB），send_animation 与普通 send_document 都挡不住，
     只有 disable_content_type_detection=True 能保住原文件。
     """
-    from core.handlers import agy_handler as ah
+    from core.handlers import agy as ah
     work = tempfile.mkdtemp()
     try:
         calls = []

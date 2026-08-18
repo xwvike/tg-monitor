@@ -18,7 +18,7 @@ import types
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import file_pipeline as fp
-from core.handlers import agy_handler as ah
+from core.handlers import agy as ah
 from tests.harness import main
 
 # Rig 会把 ah.run_file_task 换成桩，想真跑它必须在那之前留一份引用
@@ -30,13 +30,31 @@ _REAL_RUN_FILE_TASK = ah.run_file_task
 # 把工作区指向临时目录：真实的 /tmp/tg_files 里可能有正在处理的任务，
 # 测试里的启动清扫会把它们连同产物一起删掉。
 _TEST_WORKSPACE = tempfile.mkdtemp(prefix="tg_test_ws_")
+import core.handlers.agy.constants as agy_constants
+import core.handlers.agy.media as agy_media
+import core.handlers.agy.tasks as agy_tasks
+import core.handlers.agy.utils as agy_utils
+import core.handlers.agy.chat as agy_chat
+
 ah.WORKSPACE_ROOT = _TEST_WORKSPACE
+agy_constants.WORKSPACE_ROOT = _TEST_WORKSPACE
+agy_media.WORKSPACE_ROOT = _TEST_WORKSPACE
+agy_tasks.WORKSPACE_ROOT = _TEST_WORKSPACE
+agy_utils.WORKSPACE_ROOT = _TEST_WORKSPACE
 atexit.register(shutil.rmtree, _TEST_WORKSPACE, True)
 
 # 压缩各窗口，让整套测试在数秒内跑完（--test-sandbox 会在还原流程中调用）
 ah.MEDIA_GROUP_WINDOW = 0.25
+agy_constants.MEDIA_GROUP_WINDOW = 0.25
+agy_media.MEDIA_GROUP_WINDOW = 0.25
+
 ah.FILE_CAPTION_WINDOW = 0.6
+agy_constants.FILE_CAPTION_WINDOW = 0.6
+agy_media.FILE_CAPTION_WINDOW = 0.6
+
 ah.TEXT_ABSORB_MAX_AGE = 3.0
+agy_constants.TEXT_ABSORB_MAX_AGE = 3.0
+agy_media.TEXT_ABSORB_MAX_AGE = 3.0
 SETTLE = 0.9  # 足够覆盖最长窗口 + 线程调度
 
 
@@ -138,10 +156,12 @@ class Rig:
         self.send_photo = self.bot.handlers["handle_photo"]
 
         # 分流已经删掉：文件任务只有 run_file_task 一个出口
-        ah.run_file_task = (
-            lambda b, m, files, wi, wo, cap, mo, tg_photo=False:
+        def mock_run_file_task(b, m, files, wi, wo, cap, mo, tg_photo=False):
             self.launched.append(("TASK", cap, len(files), "", tg_photo))
-        )
+        
+        import core.handlers.agy.media as agy_media
+        agy_media.run_file_task = mock_run_file_task
+        ah.run_file_task = mock_run_file_task
 
     def reset(self):
         for store, lock in ((ah.file_batches, ah.file_batches_lock),
@@ -217,6 +237,7 @@ def test_text_then_file(s):
     r.reset()
     saved = ah.TEXT_ABSORB_MAX_AGE
     ah.TEXT_ABSORB_MAX_AGE = 0.2
+    agy_media.TEXT_ABSORB_MAX_AGE = 0.2
     try:
         r.dispatch_text(text(25, "你好啊"))
         time.sleep(0.4)
@@ -225,6 +246,7 @@ def test_text_then_file(s):
         s.check("文件未吸收陈旧文本", len(r.launched), 0)
     finally:
         ah.TEXT_ABSORB_MAX_AGE = saved
+        agy_media.TEXT_ABSORB_MAX_AGE = saved
 
 
 def test_text_during_download(s):
@@ -302,14 +324,15 @@ def test_handlers_respect_chat_mode(s):
     而图片/文档/贴纸都会安静忽略。
     """
     r = Rig()
-    original_stt = ah.transcribe_voice_file
+    import core.handlers.agy.voice as agy_voice
+    original_stt = agy_voice.transcribe_voice_file
     try:
         r.reset()
         r.state["in_chat"] = False
 
         s.section("非对话模式：一律不响应")
         stt_calls = []
-        ah.transcribe_voice_file = lambda p: (stt_calls.append(p), (True, "x"))[1]
+        agy_voice.transcribe_voice_file = lambda p: (stt_calls.append(p), (True, "x"))[1]
 
         r.bot.handlers["handle_voice"](voice(50))
         s.check("voice 未触发 STT", stt_calls, [])
@@ -338,7 +361,7 @@ def test_handlers_respect_chat_mode(s):
         time.sleep(0.15)
         s.check("photo 建立了文件批次", len(ah.file_batches), 1)
     finally:
-        ah.transcribe_voice_file = original_stt
+        agy_voice.transcribe_voice_file = original_stt
         r.state["in_chat"] = True
         r.reset()
 
@@ -381,19 +404,21 @@ def test_conversation_isolation(s):
     s.section("内部会话不得污染 /history 与 conv_id")
     s.truthy("Planner prompt 带内部标记",
              fp.INTERNAL_MARKER in fp.build_task_prompt(["/a.jpg"], "/out", "压缩"))
+    import core.handlers.agy.utils as agy_utils
     s.check("预览剥掉 XML 包装",
-            ah._clean_preview("<USER_REQUEST>\n何意为？\n</USER_REQUEST>"
+            agy_utils._clean_preview("<USER_REQUEST>\n何意为？\n</USER_REQUEST>"
                               "\n<ADDITIONAL_METADATA>\nt\n</ADDITIONAL_METADATA>"),
             "何意为？")
     s.check("新标记会被识别为内部会话",
-            ah._is_internal_conversation(f"x {fp.INTERNAL_MARKER} y"), True)
-    for sig in ah.LEGACY_INTERNAL_SIGNATURES:
+            agy_utils._is_internal_conversation(f"x {fp.INTERNAL_MARKER} y"), True)
+    import core.handlers.agy.constants as agy_constants
+    for sig in agy_constants.LEGACY_INTERNAL_SIGNATURES:
         s.check(f"历史特征被识别: {sig[:16]}...",
-                ah._is_internal_conversation(f"<USER_REQUEST>{sig}..."), True)
-    s.check("用户真实会话不被误杀", ah._is_internal_conversation("帮我看看这段代码"), False)
+                agy_utils._is_internal_conversation(f"<USER_REQUEST>{sig}..."), True)
+    s.check("用户真实会话不被误杀", agy_utils._is_internal_conversation("帮我看看这段代码"), False)
 
     if os.path.isdir(ah.BRAIN_DIR):
-        convs = ah.get_brain_conversations()
+        convs = agy_utils.get_brain_conversations()
         polluted = [c for c in convs if "Planner" in c[1] or fp.INTERNAL_MARKER in c[1]]
         s.check("实际会话列表中无 Planner 残留", polluted, [])
 
@@ -411,7 +436,7 @@ def test_workspace_not_on_tmpfs(s):
     s.section("默认位置")
     # 注意：模块级 WORKSPACE_ROOT 已被本测试文件改写成临时目录，
     # 因此重新读一份未被污染的默认值
-    src = importlib.import_module("core.handlers.agy_handler")
+    src = importlib.import_module("core.handlers.agy.constants")
     assert src.__file__ is not None
     default = os.path.join(
         os.path.dirname(os.path.dirname(os.path.abspath(src.__file__))),
@@ -498,26 +523,28 @@ def test_tg_photo_flag(s):
                 def send_document(self, *a, **k):
                     pass
 
-            orig_run, orig_html = ah.run_task, ah.send_html
-            ah.run_task = lambda *a, _p=product, **k: (True, [_p], "", None, None)
-            ah.send_html = lambda b, cid, txt, _s=sent, **k: _s.append(txt)
+            import core.handlers.agy.tasks as agy_tasks
+            orig_run, orig_html = agy_tasks.run_task, agy_tasks.send_html
+            agy_tasks.run_task = lambda *a, _p=product, **k: (True, [_p], "", None, None)
+            agy_tasks.send_html = lambda b, cid, txt, _s=sent, **k: _s.append(txt)
             try:
                 _REAL_RUN_FILE_TASK(_Bot(sent), photo(90), [product], work, wout,
                                     "压缩一下", "m", flag)
             finally:
-                ah.run_task, ah.send_html = orig_run, orig_html
+                agy_tasks.run_task, agy_tasks.send_html = orig_run, orig_html
             s.check(f"tg_photo={flag} 时发出提示的条数",
                     sum(1 for t in sent if "「<b>图片</b>」" in t), expect)
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
     s.section("提示文案")
-    s.truthy("点明是「图片」方式发送的", "「<b>图片</b>」" in ah.TG_PHOTO_NOTICE)
-    s.truthy("说明已转成 JPEG", "JPEG" in ah.TG_PHOTO_NOTICE)
-    s.truthy("说明尺寸被缩小", "缩小" in ah.TG_PHOTO_NOTICE)
+    import core.handlers.agy.constants as agy_constants
+    s.truthy("点明是「图片」方式发送的", "「<b>图片</b>」" in agy_constants.TG_PHOTO_NOTICE)
+    s.truthy("说明已转成 JPEG", "JPEG" in agy_constants.TG_PHOTO_NOTICE)
+    s.truthy("说明尺寸被缩小", "缩小" in agy_constants.TG_PHOTO_NOTICE)
     # 两条出路都要给：桌面端「压缩」勾选框默认勾上，取消它比改发文件更顺手
-    s.truthy("给出取消勾选压缩的做法", "取消勾选「压缩」" in ah.TG_PHOTO_NOTICE)
-    s.truthy("给出改发文件的做法", "「<b>文件</b>」" in ah.TG_PHOTO_NOTICE)
+    s.truthy("给出取消勾选压缩的做法", "取消勾选「压缩」" in agy_constants.TG_PHOTO_NOTICE)
+    s.truthy("给出改发文件的做法", "「<b>文件</b>」" in agy_constants.TG_PHOTO_NOTICE)
 
 
 def test_workspace_sweep(s):

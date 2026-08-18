@@ -15,7 +15,7 @@
   - `core/stt.py`: 独立两阶段 STT 语音识别与 Faster-Whisper 转译流水线引擎
   - `core/handlers/rescue_handler.py`: Layer 1 远程自救与快照管理 Handler
   - `core/handlers/system_handler.py`: Layer 2 硬件诊断、Docker 容器与 Systemctl 健康度 Handler
-  - `core/handlers/agy_handler.py`: Layer 3 AGY AI 对话、多模态、文件批次聚合与消息防抖 Handler
+  - `core/handlers/agy/`: Layer 3 AGY AI 对话、多模态、文件批次聚合与消息防抖 Handler
 - **测试 (`tests/`)**: 零外部依赖的断言套件，由 `tg-bot test` 的 `[2/4]` 执行
   - `test_rescue.py`: 自救顺序、快照选取、特权适配、安装脚本边界
   - `test_user_state.py`: 原子写（含 SIGKILL 实测）、损坏留档、线程安全
