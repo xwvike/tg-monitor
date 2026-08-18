@@ -54,7 +54,7 @@ def run(bot=None, agy_bin=None):
         if os.path.exists(venv_ruff):
             res = subprocess.run([venv_ruff, "check", core_dir, os.path.join(project_dir, "jobs")], capture_output=True, text=True)
             if res.returncode != 0:
-                print(f"[1/4] ❌ Ruff 静态分析拦截 (检测到未定义变量/错误导入等):")
+                print("[1/4] ❌ Ruff 静态分析拦截 (检测到未定义变量/错误导入等):")
                 print(res.stdout.strip())
                 return False
     except Exception as e:

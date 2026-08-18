@@ -5,11 +5,11 @@ import time
 
 from telebot import types
 
-from core.tg_format import esc
-from core.tts import clean_text_for_tts, generate_telegram_voice
 from core.handlers.agy.constants import user_buffers, user_buffers_lock
 from core.handlers.agy.tasks import execute_agy_prompt
 from core.handlers.agy.utils import get_brain_conversations
+from core.tg_format import esc
+from core.tts import clean_text_for_tts, generate_telegram_voice
 
 logger = logging.getLogger("AGYHandler")
 

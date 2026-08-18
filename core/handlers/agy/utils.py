@@ -6,10 +6,22 @@ import re
 import shutil
 import threading
 
-from core.file_pipeline import INLINE_TEXT_MAX_CHARS, TEXT_EXTS, AUDIO_EXTS, VIDEO_EXTS, INTERNAL_MARKER
-from core.run_archive import prune, archive_root
-from core.tg_format import esc, send_html, code_block
-from core.handlers.agy.constants import BRAIN_DIR, LEGACY_INTERNAL_SIGNATURES, conv_locks, conv_locks_guard, WORKSPACE_ROOT
+from core.file_pipeline import (
+    AUDIO_EXTS,
+    INLINE_TEXT_MAX_CHARS,
+    INTERNAL_MARKER,
+    TEXT_EXTS,
+    VIDEO_EXTS,
+)
+from core.handlers.agy.constants import (
+    BRAIN_DIR,
+    LEGACY_INTERNAL_SIGNATURES,
+    WORKSPACE_ROOT,
+    conv_locks,
+    conv_locks_guard,
+)
+from core.run_archive import archive_root, prune
+from core.tg_format import code_block, esc, send_html
 
 logger = logging.getLogger("AGYHandler")
 

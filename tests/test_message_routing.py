@@ -34,7 +34,6 @@ import core.handlers.agy.constants as agy_constants
 import core.handlers.agy.media as agy_media
 import core.handlers.agy.tasks as agy_tasks
 import core.handlers.agy.utils as agy_utils
-import core.handlers.agy.chat as agy_chat
 
 ah.WORKSPACE_ROOT = _TEST_WORKSPACE
 agy_constants.WORKSPACE_ROOT = _TEST_WORKSPACE

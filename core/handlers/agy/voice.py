@@ -2,8 +2,8 @@ import logging
 import os
 import time
 
-from core.stt import transcribe_voice_file
 from core.handlers.agy.tasks import execute_agy_prompt
+from core.stt import transcribe_voice_file
 
 logger = logging.getLogger("AGYHandler")
 

@@ -3,10 +3,19 @@ import os
 import threading
 import time
 
-from core.handlers.agy.constants import MAX_TG_FILE_SIZE, MEDIA_GROUP_WINDOW, FILE_CAPTION_WINDOW, TEXT_ABSORB_MAX_AGE, WORKSPACE_ROOT, file_batches, file_batches_lock, user_buffers, user_buffers_lock
+from core.handlers.agy.constants import (
+    FILE_CAPTION_WINDOW,
+    MAX_TG_FILE_SIZE,
+    MEDIA_GROUP_WINDOW,
+    TEXT_ABSORB_MAX_AGE,
+    WORKSPACE_ROOT,
+    file_batches,
+    file_batches_lock,
+    user_buffers,
+    user_buffers_lock,
+)
 from core.handlers.agy.tasks import run_file_task
 from core.handlers.agy.utils import _cleanup_dirs
-from core.tg_format import esc
 
 logger = logging.getLogger("AGYHandler")
 

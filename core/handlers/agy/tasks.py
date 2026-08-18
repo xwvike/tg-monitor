@@ -7,12 +7,22 @@ import time
 import telegramify_markdown
 from telebot import types
 
-from core.file_pipeline import agy_env, package_products, run_task, TG_UPLOAD_LIMIT_BYTES
+from core.file_pipeline import (
+    TG_UPLOAD_LIMIT_BYTES,
+    agy_env,
+    package_products,
+    run_task,
+)
+from core.handlers.agy.constants import AGY_BIN, TG_PHOTO_NOTICE, WORKSPACE_ROOT
+from core.handlers.agy.utils import (
+    _cleanup_dirs,
+    _get_conv_lock,
+    _send_product,
+    get_brain_conversations,
+)
 from core.run_archive import archive_run
 from core.tg_format import code_block, esc, send_html
 from core.tts import generate_telegram_voice, should_auto_speak
-from core.handlers.agy.constants import AGY_BIN, TG_PHOTO_NOTICE, WORKSPACE_ROOT
-from core.handlers.agy.utils import _cleanup_dirs, _get_conv_lock, _send_product, get_brain_conversations
 
 logger = logging.getLogger("AGYHandler")
 

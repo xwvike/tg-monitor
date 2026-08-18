@@ -24,9 +24,10 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import core.handlers.agy.tasks as agy_tasks
 from core import file_pipeline as fp
 from core.handlers import agy as ah
-import core.handlers.agy.tasks as agy_tasks
+
 ah._send_product = agy_tasks._send_product
 from tests.harness import main
 
