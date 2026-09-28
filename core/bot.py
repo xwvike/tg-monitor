@@ -268,7 +268,7 @@ def global_text_router(message):
 # ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--test-preflight":
+    if len(sys.argv) > 1 and sys.argv[1] == "--test-sandbox":
         from core.preflight import run as run_preflight
 
         print(f"=== 🧪 启动分层微内核预检流水线与四级校验 (v{VERSION}) ===")
