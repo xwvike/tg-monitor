@@ -7,27 +7,21 @@
 - **核心逻辑 (`core/`)**:
   - `core/bot.py`: Telegram 机器人 Layer 0 微内核 (动态时间戳版本 vYYYY.MM.DD-HHMM)
   - `core/task_engine.py`: 声明式动态任务调度引擎 (APScheduler + 语法防错 + 热加载)
-  - `core/file_pipeline.py`: **文件任务转发** —— 把文件与用户原话原样交给 agy，再回收产物
-  - `core/run_archive.py`: 任务留痕与配额回收
   - `core/tg_format.py`: Telegram HTML 转义与安全发送（解析失败自动降级重发）
   - `core/user_state.py`: 会话状态持久化（原子写 + 线程锁 + 损坏留档）
   - `core/tts.py`: 独立两阶段 TTS 语音合成与 OGG/Opus 转码流水线引擎
   - `core/stt.py`: 独立两阶段 STT 语音识别与 Faster-Whisper 转译流水线引擎
   - `core/handlers/rescue_handler.py`: Layer 1 远程自救与快照管理 Handler
   - `core/handlers/system_handler.py`: Layer 2 硬件诊断、Docker 容器与 Systemctl 健康度 Handler
-  - `core/handlers/agy/`: Layer 3 AGY AI 对话、多模态、文件批次聚合与消息防抖 Handler
+  - `core/handlers/agy/`: Layer 3 AGY AI 对话、多模态附件（图片/文件随消息进入当前会话）与消息防抖 Handler
 - **测试 (`tests/`)**: 零外部依赖的断言套件，由 `tg-bot test` 的 `[2/4]` 执行
   - `test_rescue.py`: 自救顺序、快照选取、特权适配、安装脚本边界
   - `test_user_state.py`: 原子写（含 SIGKILL 实测）、损坏留档、线程安全
   - `test_tg_format.py`: HTML 转义、发送兜底、源码静态扫描
-  - `test_toolchain_doc.py`: TOOLCHAIN.md 与代码 / install.sh 的一致性
-  - `test_file_pipeline.py`: 文件名注入、prompt 结构、产物回收打包、agy 收场处置
-  - `test_run_archive.py`: 任务留痕、配额回收、trace 写入
-  - `test_message_routing.py`: 文件/文本三种到达顺序、caption 归属、会话隔离
+  - `test_docs.py`: 文档引用路径、快照清单、校验级数与代码的一致性
 - **配置与持久化 (`config/`)**:
   - `config/tasks.yaml`: 纯声明式定时任务配置表 (不含凭证，凭证由 `.env` 直接提供)
   - `config/user_states.json`: 机器人会话模式、选定 AI 模型与思考深度持久化文件
-  - `config/TOOLCHAIN.md`: 这台机器上有什么（**唯一还会被内联进 prompt 的项目文档**）
 - **定时任务与脚本库 (`jobs/`)**:
   - `jobs/auto-maintenance.sh`: 周自动维保脚本 (AGY 更新、Docker prune、日志清理)
   - `jobs/check_claude_rss.py`: Claude Code RSS 监控与 AI 中文翻译脚本
@@ -35,7 +29,6 @@
   - `bin/manage.sh`: `tg-bot` 控制与自救工具箱 (映射至 `/usr/local/bin/tg-bot`)
 - **文档**:
   - `README.md`: 系统架构、功能特性、责任边界速查与运维命令 —— 唯一的总览入口
-  - `config/TOOLCHAIN.md`: 服务器现有能力清单（内联进任务 prompt）
 - **系统快照库 (`releases/snapshots/`)**:
   - 存放项目全量平滑备份快照包 (`snap_YYYYMMDD_HHMM[_tag].tar.gz`)，上限保留 20 个
 - **日志目录 (`logs/`)**:
@@ -88,10 +81,8 @@
 **只测确定性管道，不测判断力，不测措辞。**
 
 可以测（不依赖任何人怎么说话，坏了就是真坏了）：
-- 代码行为：产物投递保真、归档与配额、路径穿越与文件名注入、软链下的项目根、
-  消息合并与 caption 归属、工作区生命周期、产物回收与打包。
-- 结构性一致：文档引用的路径是否真实存在、声明的二进制是否会被安装、
-  快照打包清单与清空清单是否一致。
+- 代码行为：原子写与状态损坏留档、HTML 转义与发送降级、自救顺序、软链下的项目根。
+- 结构性一致：文档引用的路径是否真实存在、快照打包清单与清空清单是否一致。
 
 **不许测**：
 - **预测用户会怎么说话** —— 「"帮我压压" 会被判成压缩任务吗」这类断言，措辞是我
@@ -124,7 +115,7 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
 - `./install.sh` 幂等，可反复执行以就地修复。
 - `./install.sh --check` 审计当前部署：工具链、agy、venv、.env、
   systemd unit 是否与脚本定义漂移、软链、免密 sudo、服务状态、沙箱四级校验。
-- 新增系统级依赖时，必须同步更新 `install.sh` 的 `TOOLCHAIN` 映射与 `config/TOOLCHAIN.md`。
+- 新增系统级依赖时，必须同步更新 `install.sh` 的 `TOOLCHAIN` 映射。
 
 ### 7. 声明式定时任务配置规范 (`config/tasks.yaml` & `core/task_engine.py`)
 - **纯任务声明表**: `tasks.yaml` 只定义“做什么、什么时候做”，严禁在其中放置任何凭证、Token 或连接信息。通知发送模块直接从 `.env` 环境变量读取。
@@ -132,14 +123,13 @@ Bot 全局 `parse_mode="HTML"`，任何插入消息体的**动态内容**（命�
 - **任务放置规范**: 所有新增的定时任务代码或即用即弃脚本，统一存放在 `jobs/` 目录下，严禁随手丢在项目根目录。
 
 ### 8. 菜单与按键四位一体同步
-凡是新增 Telegram 功能或指令（例如 `/model`, `/effort`），必须同时更新以下 4 个位置：
+凡是新增 Telegram 功能或指令（例如 `/model`, `/voice`），必须同时更新以下 4 个位置：
 1. `init_commands()`: 注册到 Telegram API 的斜杠弹窗菜单中。
 2. `get_main_keyboard(user_id)`: 注册到 Reply 底部面板按钮中。
 3. `global_text_router(message)`: 在普通模式分发中挂载文本匹配。
 4. `send_welcome(message)`: 在 `/help` 欢迎词中加入功能说明。
 
-### 9. AGY AI 模型与思考深度交互规范
-- `/model`: 弹窗 1-Click 选择 AI 模型 (Flash / Pro / Claude / GPT)。
-- `/effort`: 弹窗选择思考推理深度 (Low / Medium / High)。
-- `/settings`: 查阅当前会话选定的模型、思考深度及 Conversation ID。
-- **自动退避重试 (Auto-Fallback Retry)**: 若所选模型（如 Claude Opus/Sonnet）不支持 `--effort`，后台捕获异常后自动剥离 `--effort` 重试，保障 Telegram 前端 100% 顺畅应答。
+### 9. AGY AI 模型交互规范
+- `/model`: 列表实时取自 `agy models`，严禁在代码中写死模型清单或默认模型。
+- 不传 `--effort`：档位已编码在模型 ID 中，与 ID 不一致会被 agy 判为冲突，Claude 模型不支持该参数。
+- `/settings`: 查阅当前会话选定的模型及 Conversation ID。

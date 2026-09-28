@@ -108,7 +108,6 @@ def init_commands():
                 types.BotCommand("net", "🌐 查看网络卡接口与 IP"),
                 types.BotCommand("chat", "💬 进入 AGY 沉浸对话模式"),
                 types.BotCommand("model", "🤖 切换 AGY AI 模型 (Flash/Pro/Claude/GPT)"),
-                types.BotCommand("effort", "⚡ 切换思考推理深度 (Low/Medium/High)"),
                 types.BotCommand("voice", "🔊 开启/关闭短复自动发语音"),
                 types.BotCommand("settings", "⚙️ 查看 AGY 当前配置与参数"),
                 types.BotCommand("new", "🆕 新建空白对话"),
@@ -139,7 +138,7 @@ from handlers.system_handler import register_system_handlers
 system_handlers = register_system_handlers(bot, ALLOWED_USER_ID)
 
 # Layer 3: AGY AI 对话与会话管理
-# L3 依赖链最重（telegramify_markdown, file_pipeline, stt, tts 等），
+# L3 依赖链最重（telegramify_markdown, stt, tts 等），
 # 如果这里炸了（比如某个第三方包没装、Python 版本不兼容），
 # 不应该把 L0/L1/L2 一起拖下水。降级后自救和系统监控仍可用。
 _l3_available = False
@@ -183,7 +182,6 @@ def send_welcome(message):
         "<b>💬 AGY AI 智能体控制:</b>\n"
         "• <b>/chat</b>: 进入沉浸式 AGY 对话模式\n"
         "• <b>/model</b>: 切换 AI 模型 (Flash/Pro/Claude/GPT)\n"
-        "• <b>/effort</b>: 切换思考推理深度 (Low/Medium/High)\n"
         "• <b>/settings</b>: 查看 AGY 会话配置与参数\n"
         "• <b>/history</b>: 查看并恢复以往的对话记录\n"
         "• <b>/new</b>: 开启新的空白对话"

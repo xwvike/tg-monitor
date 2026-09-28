@@ -2,136 +2,21 @@ import logging
 import os
 import subprocess
 import threading
-import time
 
 import telegramify_markdown
 from telebot import types
 
-from core.file_pipeline import (
-    TG_UPLOAD_LIMIT_BYTES,
-    agy_env,
-    package_products,
-    run_task,
-)
-from core.handlers.agy.constants import AGY_BIN, TG_PHOTO_NOTICE, WORKSPACE_ROOT
+from core.handlers.agy.constants import AGY_BIN
 from core.handlers.agy.utils import (
     _cleanup_dirs,
     _get_conv_lock,
-    _send_product,
+    agy_env,
     get_brain_conversations,
 )
-from core.run_archive import archive_run
-from core.tg_format import code_block, esc, send_html
+from core.tg_format import code_block
 from core.tts import generate_telegram_voice, should_auto_speak
 
 logger = logging.getLogger("AGYHandler")
-
-def run_file_task(bot, message, file_paths, workspace_in, workspace_out,
-                  caption, model, tg_photo=False):
-    chat_id = message.chat.id
-    try:
-        status_msg = bot.send_message(
-            chat_id, "⚙️ 已交给 AGY 处理...", reply_to_message_id=message.message_id
-        )
-    except Exception:
-        status_msg = None
-
-    last_text = {"value": ""}
-    trace: dict[str, object] = {"started_at": time.strftime("%Y-%m-%d %H:%M:%S")}
-    ok, error = False, None
-
-    def on_status(text):
-        if status_msg is None or text == last_text["value"]:
-            return
-        last_text["value"] = text
-        try:
-            bot.edit_message_text(text, chat_id, status_msg.message_id)
-        except Exception:
-            pass
-
-    try:
-        ok, products, reply, error, warning = run_task(
-            file_paths, workspace_in, workspace_out, caption, model, on_status,
-            trace=trace,
-        )
-
-        if ok:
-            if warning:
-                send_html(bot, chat_id, warning,
-                          reply_to_message_id=message.message_id)
-
-            if reply:
-                send_html(
-                    bot, chat_id,
-                    f"🤖 <b>agy：</b>\n──────────────────────\n{esc(reply)}",
-                    reply_to_message_id=message.message_id,
-                )
-
-            count = len(products)
-            products, packed = package_products(
-                products, workspace_out, os.path.splitext(
-                    os.path.basename(file_paths[0]))[0] if file_paths else "output"
-            )
-            if packed:
-                on_status(f"📦 共 {count} 个产物，已打包为压缩包回传...")
-            elif count:
-                on_status(f"✅ 处理完成，正在回传 {count} 个文件...")
-            for path in products:
-                size = os.path.getsize(path)
-                if size > TG_UPLOAD_LIMIT_BYTES:
-                    bot.send_message(
-                        chat_id,
-                        f"⚠️ 产物 <code>{esc(os.path.basename(path))}</code> 为 "
-                        f"{size / 1048576:.1f} MB，超过 Telegram 机器人 "
-                        f"{TG_UPLOAD_LIMIT_BYTES // 1048576} MB 的上传上限，无法回传。\n"
-                        f"可以让我按更小的尺寸重做，或拆成几批分别处理。",
-                        parse_mode="HTML",
-                    )
-                    continue
-                try:
-                    _send_product(bot, chat_id, message.message_id, path)
-                except Exception as e:
-                    logger.error(f"回传产物 {path} 失败: {e}")
-                    send_html(bot, chat_id,
-                              f"⚠️ 产物 {esc(os.path.basename(path))} 回传失败: {esc(e)}")
-            if tg_photo:
-                send_html(bot, chat_id, TG_PHOTO_NOTICE)
-            if status_msg is not None:
-                try:
-                    bot.delete_message(chat_id, status_msg.message_id)
-                except Exception:
-                    pass
-        else:
-            if status_msg is not None:
-                try:
-                    bot.edit_message_text(
-                        error, chat_id, status_msg.message_id, parse_mode="HTML"
-                    )
-                    return
-                except Exception:
-                    pass
-            bot.send_message(chat_id, error, parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"文件流水线异常: {e}")
-        error = f"流水线异常: {e}"
-        try:
-            bot.send_message(chat_id, f"❌ 文件处理流水线异常: {e}")
-        except Exception:
-            pass
-    finally:
-        trace.update({
-            "finished_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "ok": ok,
-            "error": error,
-            "chat_id": chat_id,
-            "message_id": message.message_id,
-            "tg_photo": tg_photo,
-        })
-        try:
-            archive_run(WORKSPACE_ROOT, workspace_in, workspace_out, trace)
-        except Exception as e:
-            logger.warning(f"任务留痕失败: {e}")
-        _cleanup_dirs([workspace_in, workspace_out])
 
 
 def execute_agy_prompt(
@@ -165,9 +50,7 @@ def execute_agy_prompt(
         final_prompt = prompt
         if attached_files:
             joined = "\n".join(f"  - {p}" for p in attached_files)
-            final_prompt = (
-                f"{prompt}\n\n请读取并结合以下附件文件进行分析或回答：\n{joined}"
-            )
+            final_prompt = f"{prompt}\n\n[随消息附带的文件]\n{joined}".strip()
 
         conv_lock = _get_conv_lock(message.from_user.id)
         conv_lock.acquire()
@@ -177,10 +60,6 @@ def execute_agy_prompt(
         model = state.get("model")
         if model:
             cmd.extend(["--model", model])
-
-        effort = state.get("effort")
-        if effort:
-            cmd.extend(["--effort", effort])
 
         if state.get("conv_id"):
             cmd.extend(["--conversation", state["conv_id"]])
@@ -196,31 +75,6 @@ def execute_agy_prompt(
                 env=env,
                 cwd=os.path.expanduser("~"),
             )
-            output_err = (res.stderr or "") + (res.stdout or "")
-
-            if res.returncode != 0 and "--effort is not supported" in output_err:
-                logger.info(
-                    f"模型 [{model}] 不支持 --effort，自动移除 --effort 参数并重试..."
-                )
-                retry_cmd = []
-                skip_next = False
-                for token in cmd:
-                    if skip_next:
-                        skip_next = False
-                        continue
-                    if token == "--effort":
-                        skip_next = True
-                        continue
-                    retry_cmd.append(token)
-                res = subprocess.run(
-                    retry_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=240,
-                    env=env,
-                    cwd=os.path.expanduser("~"),
-                )
-
             output_err = (res.stderr or "") + (res.stdout or "")
 
             if (

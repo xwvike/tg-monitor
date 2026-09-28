@@ -22,8 +22,7 @@ logger = logging.getLogger("UserState")
 DEFAULT_STATE = {
     "in_chat": False,
     "conv_id": None,
-    "model": "gemini-3.6-flash-high",
-    "effort": "high",
+    "model": None,
 }
 
 

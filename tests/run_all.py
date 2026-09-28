@@ -13,12 +13,9 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tests import (
-    test_file_pipeline,
-    test_message_routing,
+    test_docs,
     test_rescue,
-    test_run_archive,
     test_tg_format,
-    test_toolchain_doc,
     test_user_state,
 )
 from tests.harness import run_suites
@@ -27,10 +24,7 @@ ALL_SUITES = (
     test_rescue.SUITES
     + test_user_state.SUITES
     + test_tg_format.SUITES
-    + test_toolchain_doc.SUITES
-    + test_file_pipeline.SUITES
-    + test_message_routing.SUITES
-    + test_run_archive.SUITES
+    + test_docs.SUITES
 )
 
 

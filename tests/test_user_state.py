@@ -49,7 +49,6 @@ def test_basic_roundtrip(s):
         st = legacy.get(42)
         s.check("保留原有值", st["in_chat"], True)
         s.check("补上 model", st["model"], DEFAULT_STATE["model"])
-        s.check("补上 effort", st["effort"], DEFAULT_STATE["effort"])
 
 
 def test_atomic_write(s):

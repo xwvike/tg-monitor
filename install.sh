@@ -25,36 +25,10 @@ SUDOERS_FILE="/etc/sudoers.d/tg-monitor"
 UNIT_BOT="/etc/systemd/system/tg-monitor.service"
 UNIT_ENGINE="/etc/systemd/system/tg-task-engine.service"
 
-# 文件处理流水线所依赖的系统工具链（对应 config/TOOLCHAIN.md）
-# 缺任何一个，Layer 3 的文件处理能力就是残废的
+# 语音收发 (core/stt.py / core/tts.py) 依赖 ffmpeg 转码
 declare -A TOOLCHAIN=(
     [ffmpeg]=ffmpeg
     [ffprobe]=ffmpeg
-    [convert]=imagemagick
-    [identify]=imagemagick
-    [magick]=imagemagick
-    [pngquant]=pngquant
-    [pandoc]=pandoc
-    [pdftotext]=poppler-utils
-    [pdfinfo]=poppler-utils
-    [pdfimages]=poppler-utils
-    [pdftoppm]=poppler-utils
-    [gs]=ghostscript
-    [soffice]=libreoffice-core-nogui
-    [unar]=unar
-    [lsar]=unar
-    [zip]=zip
-    [unzip]=unzip
-    [zstd]=zstd
-)
-
-# 有些能力**无法靠"命令是否存在"判断**：soffice 二进制由 core 提供，
-# 但缺了 calc/writer/impress 组件就读不了对应格式，而 libreoffice
-# 报错时仍返回 0 —— 只会静默产不出文件。这类必须直接查包。
-declare -a REQUIRED_PKGS=(
-    libreoffice-calc      # xls / xlsx / csv
-    libreoffice-writer    # doc / docx / odt
-    libreoffice-impress   # ppt / pptx
 )
 
 CHECK_ONLY=false
@@ -156,54 +130,14 @@ if $CHECK_ONLY; then
     echo "   项目根目录: $PROJECT_ROOT"
     echo "======================================"
 
-    step "系统工具链 (config/TOOLCHAIN.md 声明的能力)"
+    step "系统工具链"
     for cmd in "${!TOOLCHAIN[@]}"; do
         if command -v "$cmd" >/dev/null 2>&1; then
             ok "$cmd"
         else
-            bad "$cmd 缺失 (apt 包: ${TOOLCHAIN[$cmd]}) — 文件处理相关能力将不可用"
+            bad "$cmd 缺失 (apt 包: ${TOOLCHAIN[$cmd]}) — 语音收发不可用"
         fi
     done
-
-    step "无法由命令名判断的组件包"
-    for pkg in "${REQUIRED_PKGS[@]}"; do
-        if dpkg -s "$pkg" >/dev/null 2>&1; then
-            ok "$pkg"
-        else
-            bad "$pkg 缺失 — soffice 存在但读不了对应格式，且失败时仍返回 0"
-        fi
-    done
-
-    # 视频硬编解码（可选加速，非硬性依赖）。
-    # 缺了只是转码回落到 CPU 软编 —— 功能不受影响，所以一律 warn 不 bad。
-    # 加组会永久改动用户权限，按本脚本原则 2 只告知、不代劳。
-    step "视频硬件加速 (核显, 可选)"
-    if [ ! -e /dev/dri/renderD128 ]; then
-        warn "无 /dev/dri/renderD128 — 本机无可用核显, 转码只能走 CPU 软编"
-    else
-        if dpkg -s intel-media-va-driver >/dev/null 2>&1 \
-           || dpkg -s intel-media-va-driver-non-free >/dev/null 2>&1; then
-            ok "VA-API 驱动已装"
-        else
-            warn "缺 VA-API 驱动 — 装: sudo apt install intel-media-va-driver"
-        fi
-        # 注意: 本脚本 set -o pipefail, 不能用 `cmd | grep -q`。grep -q 一匹配就
-        # 关掉管道读端, 左边进程吃 SIGPIPE 以非零退出, pipefail 会把整条管道判为
-        # 失败 —— 明明匹配上了却走 else 分支。所以先取回全部输出再做字符串匹配。
-        _groups="$(id -nG "$USER" 2>/dev/null || true)"
-        if [[ " $_groups " == *" render "* ]]; then
-            ok "$USER 在 render 组"
-        else
-            warn "$USER 不在 render 组 — 服务访问不到 /dev/dri/renderD128, 硬编不可用"
-            echo "     修复: sudo usermod -aG render $USER 然后重启服务"
-        fi
-        _encoders="$(ffmpeg -hide_banner -encoders 2>/dev/null || true)"
-        if [[ "$_encoders" == *h264_vaapi* ]]; then
-            ok "ffmpeg 带 h264_vaapi 编码器"
-        else
-            warn "ffmpeg 未编译 VAAPI 支持 — 硬编不可用"
-        fi
-    fi
 
     step "AGY 智能体引擎"
     if [ -x "$AGY_BIN" ]; then
@@ -330,16 +264,13 @@ missing_pkgs=()
 for cmd in "${!TOOLCHAIN[@]}"; do
     command -v "$cmd" >/dev/null 2>&1 || missing_pkgs+=("${TOOLCHAIN[$cmd]}")
 done
-for pkg in "${REQUIRED_PKGS[@]}"; do
-    dpkg -s "$pkg" >/dev/null 2>&1 || missing_pkgs+=("$pkg")
-done
 # 去重
 if [ ${#missing_pkgs[@]} -gt 0 ]; then
     mapfile -t missing_pkgs < <(printf '%s\n' "${missing_pkgs[@]}" | sort -u)
     echo "  需要安装: ${missing_pkgs[*]}"
     run_apt update -qq
-    # --no-install-recommends：imagemagick/ffmpeg 的推荐依赖会拖进 mesa、GTK、
-    # X11 等整套图形栈（361 → 255 个包），在无头服务器上纯属浪费且拖慢部署。
+    # --no-install-recommends：ffmpeg 的推荐依赖会拖进 mesa、GTK、
+    # X11 等整套图形栈，在无头服务器上纯属浪费且拖慢部署。
     # 真正需要的编解码库都是 Depends，不受影响。
     run_apt install -y --no-install-recommends "${missing_pkgs[@]}"
     ok "系统工具链安装完成"
@@ -380,7 +311,7 @@ if [ -x "$AGY_BIN" ]; then
     ok "agy 已安装: $("$AGY_BIN" --version 2>&1 | head -n1)"
 else
     warn "未在 $AGY_BIN 找到 agy"
-    echo "     Layer 3（对话、多模态、文件处理）将全部不可用。"
+    echo "     Layer 3（对话、多模态、语音）将全部不可用。"
     echo "     请先安装 Google Antigravity CLI 并完成 'agy' 登录授权，再重跑本脚本。"
 fi
 

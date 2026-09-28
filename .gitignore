@@ -9,4 +9,3 @@ config/user_states.json
 .vscode/
 .DS_Store
 config/*.guid
-workspace/

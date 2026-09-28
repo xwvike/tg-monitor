@@ -11,7 +11,6 @@
   ],
   "exclude": [
     "venv",
-    "workspace",
     "releases",
     ".git",
     "**/__pycache__"

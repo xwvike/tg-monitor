@@ -7,13 +7,17 @@ from telebot import types
 
 from core.handlers.agy.constants import user_buffers, user_buffers_lock
 from core.handlers.agy.tasks import execute_agy_prompt
-from core.handlers.agy.utils import get_brain_conversations
+from core.handlers.agy.utils import (
+    _cleanup_dirs,
+    get_brain_conversations,
+    list_agy_models,
+)
 from core.tg_format import esc
 from core.tts import clean_text_for_tts, generate_telegram_voice
 
 logger = logging.getLogger("AGYHandler")
 
-def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_states_fn, get_main_keyboard_fn, claim_batch_fn):
+def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_states_fn, get_main_keyboard_fn):
     @bot.message_handler(commands=["chat"])
     def handle_chat(message):
         if message.from_user.id != allowed_user_id:
@@ -142,69 +146,36 @@ def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_st
     def handle_model_select(message):
         if message.from_user.id != allowed_user_id:
             return
-        st = get_user_state_fn(message.from_user.id)
-        current_m = st.get("model", "gemini-3.6-flash-high")
+        current_m = get_user_state_fn(message.from_user.id).get("model")
+        loading = bot.send_message(message.chat.id, "⏳ 正在从 agy 获取可用模型列表...")
 
-        markup = types.InlineKeyboardMarkup(row_width=2)
-        models_map = [
-            ("gemini-3.6-flash-high", "⚡ Gemini 3.6 Flash"),
-            ("gemini-3.1-pro-high", "🧠 Gemini 3.1 Pro"),
-            ("claude-sonnet-4-6", "🎭 Claude Sonnet 4.6"),
-            ("claude-opus-4-6-thinking", "🔮 Claude Opus 4.6"),
-            ("gpt-oss-120b-medium", "🤖 GPT-OSS 120B"),
-        ]
-        btns = []
-        for m_id, m_label in models_map:
-            prefix = "✅ " if m_id == current_m else ""
-            btns.append(
-                types.InlineKeyboardButton(
-                    f"{prefix}{m_label}", callback_data=f"setmodel:{m_id}"
+        def job():
+            try:
+                models = list_agy_models()
+            except Exception as e:
+                bot.edit_message_text(
+                    f"❌ <b>获取模型列表失败：</b> {esc(e)}",
+                    message.chat.id, loading.message_id, parse_mode="HTML",
                 )
-            )
-        markup.add(*btns[:2])
-        markup.add(*btns[2:4])
-        markup.add(btns[4])
+                return
 
-        bot.send_message(
-            message.chat.id,
-            f"🤖 <b>请选择 AGY 当前调用的 AI 模型：</b>\n"
-            f"──────────────────────\n"
-            f"📌 <b>当前选定模型</b>: <code>{esc(current_m)}</code>",
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
-
-    @bot.message_handler(commands=["effort"])
-    def handle_effort_select(message):
-        if message.from_user.id != allowed_user_id:
-            return
-        st = get_user_state_fn(message.from_user.id)
-        current_e = st.get("effort", "high")
-
-        markup = types.InlineKeyboardMarkup(row_width=3)
-        efforts = [
-            ("low", "🟢 Low (极速)"),
-            ("medium", "🟡 Medium (平衡)"),
-            ("high", "🔴 High (深度)"),
-        ]
-        btns = []
-        for e_id, e_label in efforts:
-            prefix = "✅ " if e_id == current_e else ""
-            btns.append(
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(*[
                 types.InlineKeyboardButton(
-                    f"{prefix}{e_label}", callback_data=f"seteffort:{e_id}"
+                    f"{'✅ ' if m_id == current_m else ''}{label}",
+                    callback_data=f"setmodel:{m_id}",
                 )
+                for m_id, label in models
+            ])
+            bot.edit_message_text(
+                f"🤖 <b>请选择 AGY 当前调用的 AI 模型：</b>\n"
+                f"──────────────────────\n"
+                f"📌 <b>当前选定模型</b>: <code>{esc(current_m or 'agy 默认')}</code>",
+                message.chat.id, loading.message_id,
+                reply_markup=markup, parse_mode="HTML",
             )
-        markup.add(*btns)
 
-        bot.send_message(
-            message.chat.id,
-            f"⚡ <b>请选择 AGY 思考推理深度 (Reasoning Effort)：</b>\n"
-            f"──────────────────────\n"
-            f"📌 <b>当前选定级别</b>: <code>{esc(current_e)}</code>",
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
+        threading.Thread(target=job).start()
 
     @bot.message_handler(commands=["voice"])
     def handle_voice_toggle(message):
@@ -242,24 +213,22 @@ def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_st
         msg = (
             "⚙️ <b>AGY 会话配置与全局参数</b>\n"
             "──────────────────────\n"
-            f"🤖 <b>运行 AI 模型</b>: <code>{esc(st.get('model', 'gemini-3.6-flash-high'))}</code>\n"
-            f"⚡ <b>思考推理深度</b>: <code>{esc(st.get('effort', 'high'))}</code>\n"
+            f"🤖 <b>运行 AI 模型</b>: <code>{esc(st.get('model') or 'agy 默认')}</code>\n"
             f"🔊 <b>自动语音答复</b>: {voice_str}\n"
             f"💬 <b>当前绑定会话 ID</b>: {conv_str}\n"
             f"🚪 <b>当前工作状态</b>: {mode_str}\n"
             "──────────────────────\n"
-            "💡 提示: 发送 /model 切换模型，/effort 切换推理深度，/voice 切换自动语音。"
+            "💡 提示: 发送 /model 切换模型，/voice 切换自动语音。"
         )
         bot.send_message(message.chat.id, msg, parse_mode="HTML")
 
     @bot.callback_query_handler(
         func=lambda call: (
             call.data.startswith("setmodel:")
-            or call.data.startswith("seteffort:")
             or call.data == "tts_speak"
         )
     )
-    def handle_model_effort_callback(call):
+    def handle_model_callback(call):
         if call.from_user.id != allowed_user_id:
             return
         st = get_user_state_fn(call.from_user.id)
@@ -271,16 +240,6 @@ def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_st
             bot.send_message(
                 call.message.chat.id,
                 f"✅ <b>已将 AGY 交互模型切换为：</b> <code>{esc(m_id)}</code>",
-                parse_mode="HTML",
-            )
-        elif call.data.startswith("seteffort:"):
-            e_id = call.data.replace("seteffort:", "")
-            st["effort"] = e_id
-            save_user_states_fn()
-            bot.answer_callback_query(call.id, f"思考深度已切换为: {e_id}")
-            bot.send_message(
-                call.message.chat.id,
-                f"✅ <b>已将 AGY 思考推理深度切换为：</b> <code>{esc(e_id)}</code>",
                 parse_mode="HTML",
             )
         elif call.data == "tts_speak":
@@ -315,59 +274,101 @@ def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_st
 
             threading.Thread(target=process_tts).start()
 
+    def _forward_prefix(message):
+        origin = message.forward_origin
+        if not origin:
+            return ""
+        if origin.type == "chat":
+            return f"[转发自频道/群组: {origin.chat.title}] "
+        if origin.type == "user":
+            return f"[转发自用户: {origin.sender_user.first_name}] "
+        return ""
+
+    def _get_buffer_locked(message):
+        uid = message.from_user.id
+        buf = user_buffers.get(uid)
+        if buf is None:
+            buf = {
+                "message": message,
+                "messages": [],
+                "files": [],
+                "dirs": [],
+                "pending": 0,
+                "timer": None,
+                "has_forward": False,
+                "created_at": time.time(),
+            }
+            user_buffers[uid] = buf
+        if message.forward_origin:
+            buf["has_forward"] = True
+        return buf
+
+    def _arm_locked(uid):
+        buf = user_buffers[uid]
+        if buf["timer"]:
+            buf["timer"].cancel()
+            buf["timer"] = None
+        if buf["pending"] > 0:
+            return
+        debounce_sec = 4.0 if buf["has_forward"] else 1.5
+        buf["timer"] = threading.Timer(debounce_sec, _send_buffered, args=(uid,))
+        buf["timer"].start()
+
+    def _send_buffered(uid):
+        with user_buffers_lock:
+            buf = user_buffers.get(uid)
+            if not buf or buf["pending"] > 0:
+                return
+            del user_buffers[uid]
+        execute_agy_prompt(
+            bot,
+            buf["message"],
+            "\n".join(buf["messages"]),
+            get_user_state_fn,
+            save_user_states_fn,
+            attached_files=buf["files"] or None,
+            cleanup_dirs=buf["dirs"] or None,
+        )
+
+    def begin_attachment(message):
+        with user_buffers_lock:
+            buf = _get_buffer_locked(message)
+            buf["pending"] += 1
+            if buf["timer"]:
+                buf["timer"].cancel()
+                buf["timer"] = None
+
+    def end_attachment(message, caption="", path=None, tmp_dir=None):
+        uid = message.from_user.id
+        with user_buffers_lock:
+            buf = user_buffers.get(uid)
+            if buf is None:
+                _cleanup_dirs([tmp_dir])
+                return
+            buf["pending"] -= 1
+            if caption:
+                buf["messages"].append(_forward_prefix(message) + caption)
+            if path:
+                buf["files"].append(path)
+            if tmp_dir:
+                buf["dirs"].append(tmp_dir)
+            if not buf["messages"] and not buf["files"] and buf["pending"] == 0:
+                del user_buffers[uid]
+                _cleanup_dirs(buf["dirs"])
+                return
+            _arm_locked(uid)
+
     def dispatch_text_message(message):
         uid = message.from_user.id
         st = get_user_state_fn(uid)
         if not st.get("in_chat", False):
             return False
 
-        if claim_batch_fn(message):
-            return True
-
-        forward_prefix = ""
-        if message.forward_origin:
-            origin = message.forward_origin
-            if origin.type == "chat":
-                forward_prefix = f"[转发自频道/群组: {origin.chat.title}] "
-            elif origin.type == "user":
-                forward_prefix = f"[转发自用户: {origin.sender_user.first_name}] "
-
         with user_buffers_lock:
             is_first_msg = uid not in user_buffers
-            if is_first_msg:
-                user_buffers[uid] = {
-                    "messages": [],
-                    "timer": None,
-                    "has_forward": False,
-                    "created_at": time.time(),
-                }
-
-            if message.forward_origin:
-                user_buffers[uid]["has_forward"] = True
-
-            user_buffers[uid]["messages"].append(forward_prefix + message.text)
-
-            if user_buffers[uid]["timer"]:
-                user_buffers[uid]["timer"].cancel()
-
-            def send_buffered():
-                with user_buffers_lock:
-                    if uid not in user_buffers:
-                        return
-                    combined_prompt = "\n".join(user_buffers[uid]["messages"])
-                    del user_buffers[uid]
-                execute_agy_prompt(
-                    bot,
-                    message,
-                    combined_prompt,
-                    get_user_state_fn,
-                    save_user_states_fn,
-                )
-
-            debounce_sec = 4.0 if user_buffers[uid].get("has_forward") else 1.5
-            timer = threading.Timer(debounce_sec, send_buffered)
-            user_buffers[uid]["timer"] = timer
-            timer.start()
+            buf = _get_buffer_locked(message)
+            buf["messages"].append(_forward_prefix(message) + message.text)
+            _arm_locked(uid)
 
         if is_first_msg:
             try:
@@ -384,4 +385,4 @@ def register_chat_handlers(bot, allowed_user_id, get_user_state_fn, save_user_st
         "history": handle_history,
     }
 
-    return dispatch_text_message, render_history_page, button_handlers
+    return dispatch_text_message, render_history_page, button_handlers, begin_attachment, end_attachment

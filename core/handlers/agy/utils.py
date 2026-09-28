@@ -4,24 +4,17 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import threading
 
-from core.file_pipeline import (
-    AUDIO_EXTS,
-    INLINE_TEXT_MAX_CHARS,
-    INTERNAL_MARKER,
-    TEXT_EXTS,
-    VIDEO_EXTS,
-)
 from core.handlers.agy.constants import (
+    AGY_BIN,
     BRAIN_DIR,
+    INTERNAL_MARKER,
     LEGACY_INTERNAL_SIGNATURES,
-    WORKSPACE_ROOT,
     conv_locks,
     conv_locks_guard,
 )
-from core.run_archive import archive_root, prune
-from core.tg_format import code_block, esc, send_html
 
 logger = logging.getLogger("AGYHandler")
 
@@ -70,65 +63,6 @@ def get_brain_conversations():
     conversations.sort(key=lambda x: x[2], reverse=True)
     return conversations
 
-def _send_product(bot, chat_id, reply_to, path):
-    ext = os.path.splitext(path)[1].lower()
-
-    if ext in TEXT_EXTS:
-        try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                content = fh.read().strip()
-        except Exception:
-            content = ""
-        if content and len(content) <= INLINE_TEXT_MAX_CHARS:
-            send_html(
-                bot, chat_id,
-                f"📝 <b>{esc(os.path.basename(path))}</b>\n{code_block(content)}",
-                reply_to_message_id=reply_to,
-            )
-            return
-
-    with open(path, "rb") as fh:
-        if ext == ".gif":
-            bot.send_chat_action(chat_id, "upload_document")
-            bot.send_document(
-                chat_id, fh, reply_to_message_id=reply_to,
-                disable_content_type_detection=True,
-            )
-        elif ext in VIDEO_EXTS:
-            bot.send_chat_action(chat_id, "upload_video")
-            bot.send_video(chat_id, fh, reply_to_message_id=reply_to)
-        elif ext in AUDIO_EXTS:
-            bot.send_chat_action(chat_id, "upload_audio")
-            bot.send_audio(chat_id, fh, reply_to_message_id=reply_to)
-        else:
-            bot.send_chat_action(chat_id, "upload_document")
-            bot.send_document(chat_id, fh, reply_to_message_id=reply_to)
-
-def sweep_workspaces():
-    protected = os.path.abspath(archive_root(WORKSPACE_ROOT))
-    removed = 0
-    for sub in ("in", "out"):
-        root = os.path.join(WORKSPACE_ROOT, sub)
-        if not os.path.isdir(root):
-            continue
-        for name in os.listdir(root):
-            path = os.path.join(root, name)
-            if not os.path.isdir(path):
-                continue
-            if os.path.abspath(path).startswith(protected + os.sep):
-                continue
-            try:
-                shutil.rmtree(path)
-                removed += 1
-            except Exception as e:
-                logger.warning(f"清理遗留工作区 {path} 失败: {e}")
-    if removed:
-        logger.info(f"🧹 启动清扫：已回收 {removed} 个遗留文件工作区")
-    try:
-        prune(archive_root(WORKSPACE_ROOT))
-    except Exception as e:
-        logger.warning(f"启动时回收归档失败: {e}")
-
 def _cleanup_dirs(dirs):
     for d in dirs or []:
         if d and os.path.exists(d):
@@ -136,3 +70,54 @@ def _cleanup_dirs(dirs):
                 shutil.rmtree(d)
             except Exception as e:
                 logger.warning(f"清理工作区 {d} 失败: {e}")
+
+_UNSAFE_NAME_CHARS = re.compile(r"[^\w.\-]", re.UNICODE)
+
+
+def safe_filename(name, fallback="file"):
+    """把外部提供的文件名收敛成 shell 安全的形式。
+
+    agy 以 --dangerously-skip-permissions 运行，附件的绝对路径会被它原样写进
+    自己执行的命令。转发来的文件名里的 `;` `$()` 反引号等会被 shell 解释，
+    os.path.basename() 只挡路径穿越，不挡元字符。
+    """
+    name = os.path.basename(str(name or "")).strip()
+    stem, ext = os.path.splitext(name)
+
+    ext = "." + _UNSAFE_NAME_CHARS.sub("", ext.lstrip("."))[:16] if ext else ""
+    stem = _UNSAFE_NAME_CHARS.sub("_", stem)[:80].strip("._-")
+
+    if not stem:
+        stem = fallback
+    return f"{stem}{ext if ext != '.' else ''}"
+
+
+def agy_env():
+    """调用 agy 的环境变量：代理取自 .env 的 TG_PROXY，并确保 ~/.local/bin 在 PATH 中。"""
+    env = os.environ.copy()
+    proxy = os.getenv("TG_PROXY", "").strip()
+    if proxy:
+        env["HTTP_PROXY"] = proxy
+        env["HTTPS_PROXY"] = proxy
+        env["http_proxy"] = proxy
+        env["https_proxy"] = proxy
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    env["PATH"] = os.path.expanduser("~/.local/bin") + ":" + env["PATH"]
+    return env
+
+
+def list_agy_models():
+    """实时读取 `agy models`，返回 [(model_id, 显示名), ...]。"""
+    res = subprocess.run(
+        [AGY_BIN, "models"], capture_output=True, text=True, timeout=30, env=agy_env()
+    )
+    models = []
+    for line in res.stdout.splitlines():
+        model_id, sep, label = line.partition("\t")
+        if sep and model_id.strip():
+            models.append((model_id.strip(), label.strip() or model_id.strip()))
+    if res.returncode != 0 or not models:
+        detail = (res.stderr or res.stdout).strip().splitlines()
+        raise RuntimeError(detail[-1] if detail else f"agy models 退出码 {res.returncode}")
+    return models
+

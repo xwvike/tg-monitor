@@ -202,7 +202,7 @@ def test_unit_stays_minimal(s):
     s.truthy("Restart=always 是无特权降级的前提", "Restart=always" in unit)
 
     s.section("配置的唯一真相源是 .env")
-    with open(os.path.join(PROJECT_DIR, "core", "file_pipeline.py"), encoding="utf-8") as fh:
+    with open(os.path.join(PROJECT_DIR, "core", "handlers", "agy", "utils.py"), encoding="utf-8") as fh:
         fp_body = fh.read()
     s.truthy("代理由应用从 TG_PROXY 读取", 'os.getenv("TG_PROXY"' in fp_body)
     s.check("代码中无硬编码代理端口", "10809" in fp_body, False)
