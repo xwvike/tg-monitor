@@ -65,7 +65,7 @@ def send_tg_notification(title: str, body: str):
         if proxy:
             telebot.apihelper.proxy = {"https": proxy, "http": proxy}
 
-        bot = telebot.TeleBot(bot_token, parse_mode="HTML")
+        bot = telebot.TeleBot(bot_token, parse_mode="HTML", threaded=False)
 
         # 任务输出可能是 RSS 正文、XML、报错堆栈 —— 必须转义，
         # 否则一个 `<` 就让整条通知被 Telegram 拒收并被 except 吞掉
